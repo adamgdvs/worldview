@@ -1,0 +1,84 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-worldview-phosphor: #4ade80;
+  --color-worldview-nvg: #fcd34d;
+  --color-worldview-radar: #3b82f6;
+  --color-worldview-bg: #02040a;
+  --color-worldview-panel: rgba(10, 20, 48, 0.92);
+  --color-worldview-border: rgba(60, 100, 180, 0.70);
+  --color-worldview-cyan: #00f0ff;
+  --color-worldview-orange: #d97736;
+  --color-worldview-red: #dd4444;
+  --color-worldview-green: #36d977;
+  --color-worldview-text-main: #607b9e;
+  --color-worldview-text-bright: #a1bde0;
+}
+
+@layer base {
+  body {
+    @apply bg-worldview-bg text-worldview-text-main font-mono;
+    font-size: 11px;
+    letter-spacing: 0.05em;
+  }
+}
+
+.glass-panel {
+  background: linear-gradient(160deg, rgba(16, 32, 68, 0.94) 0%, rgba(8, 16, 40, 0.94) 100%);
+  border: 1px solid rgba(60, 100, 180, 0.65);
+  border-top: 1px solid rgba(100, 160, 255, 0.30);
+  border-radius: 12px;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(60, 100, 200, 0.08), inset 0 1px 0 rgba(140, 200, 255, 0.08);
+}
+
+/* Post-processing effects (scanlines, vignette) are now handled by GPU shaders
+   in src/systems/PostProcessing.ts via CesiumJS PostProcessStage */
+
+@keyframes pulse-slow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.text-glow-cyan {
+  @apply text-worldview-cyan;
+  text-shadow: 0 0 8px rgba(0, 240, 255, 0.4);
+}
+
+.custom-scrollbar::-webkit-scrollbar { width: 4px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(30, 48, 80, 0.6); border-radius: 2px; }
+
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+:root {
+  color-scheme: dark;
+}
+
+/* Starfield background for the dark void around the globe */
+.starfield {
+  background-image:
+    radial-gradient(1px 1px at 10% 20%, rgba(255,255,255,0.15) 0%, transparent 100%),
+    radial-gradient(1px 1px at 30% 60%, rgba(255,255,255,0.1) 0%, transparent 100%),
+    radial-gradient(1px 1px at 50% 10%, rgba(255,255,255,0.12) 0%, transparent 100%),
+    radial-gradient(1px 1px at 70% 80%, rgba(255,255,255,0.08) 0%, transparent 100%),
+    radial-gradient(1px 1px at 90% 40%, rgba(255,255,255,0.1) 0%, transparent 100%),
+    radial-gradient(1px 1px at 15% 85%, rgba(255,255,255,0.06) 0%, transparent 100%),
+    radial-gradient(1px 1px at 85% 15%, rgba(255,255,255,0.08) 0%, transparent 100%),
+    radial-gradient(1px 1px at 45% 95%, rgba(255,255,255,0.05) 0%, transparent 100%),
+    radial-gradient(1px 1px at 60% 50%, rgba(255,255,255,0.07) 0%, transparent 100%),
+    radial-gradient(1px 1px at 25% 35%, rgba(255,255,255,0.09) 0%, transparent 100%);
+}
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background-color: var(--color-worldview-bg);
+  color: white;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+

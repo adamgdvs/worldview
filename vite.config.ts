@@ -1,0 +1,60 @@
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import cesium from 'vite-plugin-cesium'
+import tailwindcss from '@tailwindcss/vite'
+import aisWebSocketProxy from './vite-plugin-ais-proxy'
+
+export default defineConfig(() => {
+  return {
+    plugins: [react(), cesium(), tailwindcss(), aisWebSocketProxy()],
+    server: {
+      proxy: {
+        '/adsbfi': {
+          target: 'https://api.adsb.fi',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/adsbfi/, ''),
+        },
+        '/celestrak': {
+          target: 'https://celestrak.org',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/celestrak/, ''),
+        },
+        '/firms': {
+          target: 'https://firms.modaps.eosdis.nasa.gov',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/firms/, ''),
+        },
+        // OpenSky data API — browser sends Bearer token in Authorization header
+        '/opensky': {
+          target: 'https://opensky-network.org',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/opensky/, ''),
+          configure: (proxy) => {
+            proxy.on('proxyRes', (proxyRes) => {
+              delete proxyRes.headers['www-authenticate']
+            })
+          },
+        },
+        // OpenSky OAuth2 token endpoint (proxied to avoid CORS on localhost)
+        '/opensky-token': {
+          target: 'https://auth.opensky-network.org',
+          changeOrigin: true,
+          rewrite: () => '/auth/realms/opensky-network/protocol/openid-connect/token',
+        },
+        // n2yo.com satellite API
+        '/n2yo': {
+          target: 'https://api.n2yo.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/n2yo/, ''),
+        },
+        // gpsjam.org GPS interference data
+        '/gpsjam': {
+          target: 'https://gpsjam.org',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/gpsjam/, ''),
+        },
+        // AISStream WebSocket is handled by vite-plugin-ais-proxy (manual upgrade)
+      },
+    },
+  }
+})
