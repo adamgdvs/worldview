@@ -37,7 +37,12 @@ interface WorldviewState {
   aviationFilters: Set<AviationFilter>
   trafficDensity: number
   trafficMaxParticles: number
+  cameraBbox: [number, number, number, number] | null  // [south, west, north, east]
+  cameraHeight: number
+  cursorGeo: { lat: number; lon: number } | null
+  cctvViewerFeed: any | null
   sectionCollapsed: Record<string, boolean>
+  setCctvViewerFeed: (feed: any | null) => void
   toggleLayer: (layerId: string) => void
   setMode: (mode: string) => void
   setCity: (city: string) => void
@@ -52,6 +57,8 @@ interface WorldviewState {
   setAllAviationFilters: (on: boolean) => void
   setTrafficDensity: (d: number) => void
   setTrafficMaxParticles: (n: number) => void
+  setCameraBbox: (bbox: [number, number, number, number] | null, height: number) => void
+  setCursorGeo: (geo: { lat: number; lon: number } | null) => void
   toggleSection: (id: string) => void
 }
 
@@ -70,7 +77,12 @@ export const useStore = create<WorldviewState>((set) => ({
   aviationFilters: new Set<AviationFilter>(['civil', 'military', 'helicopter', 'uav', 'unknown']),
   trafficDensity: 0.5,
   trafficMaxParticles: 800,
+  cameraBbox: null,
+  cameraHeight: 25_000_000,
+  cursorGeo: null,
+  cctvViewerFeed: null,
   sectionCollapsed: { 'scenes': true },
+  setCctvViewerFeed: (feed) => set({ cctvViewerFeed: feed }),
   toggleLayer: (layerId: string) => set((state) => ({
     activeLayers: state.activeLayers.includes(layerId)
       ? state.activeLayers.filter((id) => id !== layerId)
@@ -100,6 +112,8 @@ export const useStore = create<WorldviewState>((set) => ({
   }),
   setTrafficDensity: (d) => set({ trafficDensity: d }),
   setTrafficMaxParticles: (n) => set({ trafficMaxParticles: n }),
+  setCameraBbox: (bbox, height) => set({ cameraBbox: bbox, cameraHeight: height }),
+  setCursorGeo: (geo) => set({ cursorGeo: geo }),
   toggleSection: (id) => set((state) => ({
     sectionCollapsed: { ...state.sectionCollapsed, [id]: !state.sectionCollapsed[id] },
   })),

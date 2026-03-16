@@ -1,27 +1,72 @@
 import { Link2 } from 'lucide-react'
 import { useStore } from '../store'
+// @ts-ignore
+import { forward as toMGRS } from 'mgrs'
+
+/** Convert decimal degrees to DMS string like 37°49'13.57"N */
+function toDMS(dec: number, isLat: boolean): string {
+  const dir = isLat ? (dec >= 0 ? 'N' : 'S') : (dec >= 0 ? 'E' : 'W')
+  const abs = Math.abs(dec)
+  const d = Math.floor(abs)
+  const mFull = (abs - d) * 60
+  const m = Math.floor(mFull)
+  const s = ((mFull - m) * 60).toFixed(2)
+  return `${d}°${String(m).padStart(2, '0')}'${s}"${dir}`
+}
+
+/** Convert lat/lon to MGRS string */
+function toMGRSString(lat: number, lon: number): string {
+  try {
+    // mgrs.forward takes [lon, lat] and precision (5 = 1m)
+    return toMGRS([lon, lat], 4) // 4 = 10m precision
+  } catch {
+    return '—'
+  }
+}
+
+/** Format MGRS with spaces: "10S EG 5078 8604" */
+function formatMGRS(mgrs: string): string {
+  if (!mgrs || mgrs === '—') return '—'
+  // MGRS format: GZD (2-3 chars) + 100km ID (2 chars) + easting/northing
+  const gz = mgrs.slice(0, mgrs.length > 5 && /[A-Z]/.test(mgrs[2]) ? 3 : 2)
+  const rest = mgrs.slice(gz.length)
+  const sq = rest.slice(0, 2)
+  const nums = rest.slice(2)
+  const half = nums.length / 2
+  const easting = nums.slice(0, half)
+  const northing = nums.slice(half)
+  return `${gz} ${sq} ${easting} ${northing}`
+}
 
 export function HUD() {
   const activeMode = useStore((s) => s.activeMode)
   const hudLayout = useStore((s) => s.hudLayout)
   const cleanUI = useStore((s) => s.cleanUI)
+  const cursorGeo = useStore((s) => s.cursorGeo)
+  const cameraHeight = useStore((s) => s.cameraHeight)
 
   if (cleanUI) return null
 
   const utcNow = new Date().toISOString().slice(11, 19) + 'Z'
 
+  // Format cursor position
+  const cursorDMS = cursorGeo
+    ? `${toDMS(cursorGeo.lat, true)}  ${toDMS(cursorGeo.lon, false)}`
+    : null
+  const cursorMGRS = cursorGeo
+    ? formatMGRS(toMGRSString(cursorGeo.lat, cursorGeo.lon))
+    : null
+
+  // Format camera altitude
+  const altStr = cameraHeight >= 1_000_000
+    ? `${(cameraHeight / 1_000_000).toFixed(1)}M`
+    : cameraHeight >= 1_000
+      ? `${(cameraHeight / 1_000).toFixed(1)}K`
+      : `${Math.round(cameraHeight)}`
+
   return (
     <>
-      {/* Center Crosshair — always shown */}
-      <div className="absolute inset-0 z-10 pointer-events-none flex items-center justify-center">
-        <div className="relative w-10 h-10 border border-worldview-cyan/30 rounded-sm flex items-center justify-center">
-          <div className="w-1 h-1 bg-worldview-cyan rounded-full shadow-[0_0_5px_rgba(0,240,255,1)]" />
-          <div className="absolute w-5 h-px bg-worldview-cyan/50 -left-[25px]" />
-          <div className="absolute w-5 h-px bg-worldview-cyan/50 -right-[25px]" />
-          <div className="absolute h-5 w-px bg-worldview-cyan/50 -top-[25px]" />
-          <div className="absolute h-5 w-px bg-worldview-cyan/50 -bottom-[25px]" />
-        </div>
-      </div>
+      {/* Crosshair reticle is now rendered as a CesiumJS billboard in App.tsx */}
 
       {/* Minimal: crosshair + UTC time */}
       {hudLayout === 'Minimal' && (
@@ -72,16 +117,27 @@ export function HUD() {
             </div>
           </div>
 
-          {/* Bottom Left Stats */}
+          {/* Bottom Left — Cursor GPS coordinates */}
           <div className="absolute bottom-[165px] left-[230px] z-20 pointer-events-none space-y-0.5">
-            <div className="text-[9px] text-[#4a6385] font-mono tracking-wider">GSD: 1399.31M NIIRS: <span className="text-worldview-orange">0.0</span></div>
-            <div className="text-[9px] text-[#4a6385] font-mono tracking-wider">ALT: 3731487M SUN: <span className="text-worldview-orange">-42.8° EL</span></div>
+            {cursorGeo ? (
+              <>
+                <div className="text-[9px] text-worldview-orange font-mono tracking-wider flex items-start gap-1">
+                  <span className="text-[#4a6385]">┗</span>
+                  <div>
+                    <div>MGRS: <span className="font-bold">{cursorMGRS}</span></div>
+                    <div className="ml-[2ch]">{cursorDMS}</div>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="text-[9px] text-[#4a6385] font-mono tracking-wider">NIIRS: <span className="text-worldview-orange">0.0</span></div>
+            )}
           </div>
 
           {/* Bottom Right Stats */}
           <div className="absolute bottom-[165px] right-[230px] z-20 pointer-events-none text-right space-y-0.5">
             <div className="text-[9px] text-[#4a6385] font-mono tracking-wider">GSD: 1399.31M NIIRS: <span className="text-worldview-orange">0.0</span></div>
-            <div className="text-[9px] text-[#4a6385] font-mono tracking-wider">ALT: 3731487M SUN: <span className="text-worldview-orange">-42.8° EL</span></div>
+            <div className="text-[9px] text-[#4a6385] font-mono tracking-wider">ALT: {altStr}M SUN: <span className="text-worldview-orange">-42.8° EL</span></div>
           </div>
         </>
       )}
@@ -90,9 +146,9 @@ export function HUD() {
       {hudLayout === 'Full' && (
         <div className="absolute bottom-[165px] left-1/2 -translate-x-1/2 z-20 pointer-events-none">
           <div className="text-[8px] text-[#4a6385] font-mono tracking-wider">
-            CAM ALT: <span className="text-worldview-cyan">--</span> |
-            LAT: <span className="text-worldview-text-bright">--</span> |
-            LON: <span className="text-worldview-text-bright">--</span>
+            CAM ALT: <span className="text-worldview-cyan">{altStr}M</span> |
+            LAT: <span className="text-worldview-text-bright">{cursorGeo?.lat.toFixed(4) ?? '--'}</span> |
+            LON: <span className="text-worldview-text-bright">{cursorGeo?.lon.toFixed(4) ?? '--'}</span>
           </div>
         </div>
       )}

@@ -61,23 +61,39 @@ function parseOverpassResponse(data: any): RoadSegment[] {
 
 export async function fetchRoadNetwork(city: string): Promise<RoadSegment[]> {
   if (city === 'Global' || !CITY_BBOX[city]) return []
+  return fetchRoadNetworkByBbox(CITY_BBOX[city], city)
+}
 
-  const cacheKey = `worldview-roads-${city}`
+/** Fetch roads for an arbitrary bounding box [south, west, north, east] */
+export async function fetchRoadNetworkByBbox(
+  bbox: [number, number, number, number],
+  label?: string,
+): Promise<RoadSegment[]> {
+  // Clamp bbox size to avoid huge Overpass queries
+  const [s, w, n, e] = bbox
+  const latSpan = n - s
+  const lonSpan = e - w
+  if (latSpan > 0.5 || lonSpan > 0.5) {
+    console.info(`[Traffic] Bbox too large (${latSpan.toFixed(2)}°×${lonSpan.toFixed(2)}°), skipping Overpass`)
+    return []
+  }
+
+  // Round bbox to 2 decimal places for cache key stability
+  const cacheKey = `worldview-roads-${s.toFixed(2)},${w.toFixed(2)},${n.toFixed(2)},${e.toFixed(2)}`
 
   // Check IndexedDB cache
   try {
     const cached = await get<CacheEntry>(cacheKey)
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-      console.info(`[Traffic] Cache hit for ${city} (${cached.segments.length} segments)`)
+      console.info(`[Traffic] Cache hit for ${label ?? 'bbox'} (${cached.segments.length} segments)`)
       return cached.segments
     }
   } catch { /* cache miss */ }
 
-  const bbox = CITY_BBOX[city]
   const query = buildOverpassQuery(bbox)
 
   try {
-    console.info(`[Traffic] Fetching road network for ${city}...`)
+    console.info(`[Traffic] Fetching road network for ${label ?? 'bbox'}...`)
     const res = await fetch('https://overpass-api.de/api/interpreter', {
       method: 'POST',
       body: `data=${encodeURIComponent(query)}`,
@@ -91,7 +107,7 @@ export async function fetchRoadNetwork(city: string): Promise<RoadSegment[]> {
 
     const data = await res.json()
     const segments = parseOverpassResponse(data)
-    console.info(`[Traffic] Got ${segments.length} road segments for ${city}`)
+    console.info(`[Traffic] Got ${segments.length} road segments for ${label ?? 'bbox'}`)
 
     // Cache in IndexedDB
     try {

@@ -1,5 +1,5 @@
 import { useStore, type AviationFilter } from '../store'
-import { Plane, Satellite, Activity, Ship, Flame, Wind, Radio, Map, Shield, Car, Camera } from 'lucide-react'
+import { Plane, Satellite, Activity, Ship, Flame, Wind, Radio, Map, Shield, Car, Camera, Tag } from 'lucide-react'
 import { CollapsibleSection } from './ui/CollapsibleSection'
 import { SatelliteLookup } from './SatelliteLookup'
 
@@ -12,65 +12,27 @@ const AVIATION_CATEGORIES: { id: AviationFilter; label: string; color: string }[
 ]
 
 export function SidebarLeft() {
-  const { activeLayers, toggleLayer, selectedCity, setCity } = useStore()
+  const { activeLayers, toggleLayer } = useStore()
   const cleanUI = useStore((s) => s.cleanUI)
   const aviationFilters = useStore((s) => s.aviationFilters)
   const toggleAviationFilter = useStore((s) => s.toggleAviationFilter)
   const setAllAviationFilters = useStore((s) => s.setAllAviationFilters)
   const trafficDensity = useStore((s) => s.trafficDensity)
   const setTrafficDensity = useStore((s) => s.setTrafficDensity)
+  const showLabels = useStore((s) => s.showLabels)
+  const toggleLabels = useStore((s) => s.toggleLabels)
 
   if (cleanUI) return null
 
-  const cities = [
-    { id: 'Washington DC', label: 'DC' },
-    { id: 'London', label: 'LDN' },
-    { id: 'Paris', label: 'PAR' },
-    { id: 'Tokyo', label: 'TYO' },
-    { id: 'Hong Kong', label: 'HKG' },
-    { id: 'Singapore', label: 'SIN' },
-  ]
-
   return (
     <div className="absolute top-[50%] -translate-y-1/2 left-3 z-20 pointer-events-auto w-[200px] flex flex-col gap-2 max-h-[75vh]">
-      {/* CCTV FEEDS */}
-      <CollapsibleSection id="cctv-mesh" title="CCTV FEEDS" standalone>
-        <div className="py-0.5">
-          <LayerRow
-            label="CCTV Cameras"
-            icon={<Camera size={12} />}
-            color="#00F0FF"
-            active={activeLayers.includes('cctv')}
-            onToggle={() => toggleLayer('cctv')}
-          />
-        </div>
-      </CollapsibleSection>
-
       {/* DATA LAYERS */}
       <CollapsibleSection id="data-layers" title="DATA LAYERS" standalone>
         <div className="max-h-[50vh] overflow-y-auto custom-scrollbar">
-          {/* City Nav */}
-          <div className="flex flex-wrap gap-1 px-3 py-2 border-b border-worldview-border/30">
-            {cities.map((city) => (
-              <button
-                key={city.id}
-                onClick={() => setCity(city.id)}
-                className={`px-2 py-0.5 border text-[8px] font-bold transition-all ${
-                  selectedCity === city.id
-                    ? 'border-worldview-cyan text-worldview-cyan bg-worldview-cyan/10'
-                    : 'border-worldview-border/40 text-worldview-text-main hover:border-worldview-text-bright hover:text-worldview-text-bright'
-                }`}
-              >
-                {city.label}
-              </button>
-            ))}
-          </div>
-
           <LayerSection title="AVIATION">
             <LayerRow
               label="Civil ADS-B"
               icon={<Plane size={12} />}
-              count="4,281"
               color="#00F0FF"
               active={activeLayers.includes('avi-civil')}
               onToggle={() => toggleLayer('avi-civil')}
@@ -78,7 +40,6 @@ export function SidebarLeft() {
             <LayerRow
               label="Military"
               icon={<Plane size={12} />}
-              count="137"
               color="#D97736"
               active={activeLayers.includes('avi-mil')}
               onToggle={() => toggleLayer('avi-mil')}
@@ -86,7 +47,6 @@ export function SidebarLeft() {
             <LayerRow
               label="Satellites"
               icon={<Satellite size={12} />}
-              count="892"
               color="#D4A017"
               active={activeLayers.includes('satellites')}
               onToggle={() => toggleLayer('satellites')}
@@ -138,14 +98,13 @@ export function SidebarLeft() {
             <LayerRow
               label="AIS Vessels"
               icon={<Ship size={12} />}
-              count="12,440"
               color="#36D977"
               active={activeLayers.includes('maritime')}
               onToggle={() => toggleLayer('maritime')}
             />
           </LayerSection>
 
-          <LayerSection title="GROUND INTEL">
+          <LayerSection title="GROUND">
             <LayerRow
               label="Traffic Sim"
               icon={<Car size={12} />}
@@ -155,6 +114,9 @@ export function SidebarLeft() {
             />
             {activeLayers.includes('traffic') && (
               <div className="px-3 py-1.5 border-t border-worldview-border/20">
+                <div className="flex items-center gap-1.5 mb-1.5">
+                  <span className="text-[6px] font-mono tracking-wider px-1 py-0.5 rounded bg-[#36D977]/15 text-[#36D977] border border-[#36D977]/30">GOOGLE TRAFFIC</span>
+                </div>
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-[7px] text-[#4a6a8a] font-bold tracking-[1.5px] uppercase">DENSITY</span>
                   <span className="text-[7px] text-[#5a7a9a] font-mono">{Math.round(trafficDensity * 100)}%</span>
@@ -172,7 +134,6 @@ export function SidebarLeft() {
             <LayerRow
               label="Seismic"
               icon={<Activity size={12} />}
-              count="23"
               color="#D97736"
               active={activeLayers.includes('seismic')}
               onToggle={() => toggleLayer('seismic')}
@@ -180,7 +141,6 @@ export function SidebarLeft() {
             <LayerRow
               label="Fires"
               icon={<Flame size={12} />}
-              count="341"
               color="#FF6B2B"
               active={activeLayers.includes('fires')}
               onToggle={() => toggleLayer('fires')}
@@ -188,10 +148,16 @@ export function SidebarLeft() {
             <LayerRow
               label="Air Quality"
               icon={<Wind size={12} />}
-              count="1,204"
               color="#9966FF"
               active={activeLayers.includes('airq')}
               onToggle={() => toggleLayer('airq')}
+            />
+            <LayerRow
+              label="CCTV Cameras"
+              icon={<Camera size={12} />}
+              color="#00F0FF"
+              active={activeLayers.includes('cctv')}
+              onToggle={() => toggleLayer('cctv')}
             />
           </LayerSection>
 
@@ -217,6 +183,24 @@ export function SidebarLeft() {
               active={activeLayers.includes('gpsjam')}
               onToggle={() => toggleLayer('gpsjam')}
             />
+          </LayerSection>
+
+          <LayerSection title="DISPLAY">
+            <div
+              className={`flex items-center justify-between px-3 py-1 cursor-pointer hover:bg-white/5 transition-colors ${showLabels ? 'text-worldview-text-bright' : 'text-worldview-text-main'}`}
+              onClick={toggleLabels}
+            >
+              <div className="flex items-center gap-1.5 min-w-0">
+                <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: '#C8D8E8' }} />
+                <span className="text-[#5a7a9a] shrink-0"><Tag size={12} /></span>
+                <span className="text-[9px] truncate">Labels</span>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0 ml-1">
+                <div className={`w-5 h-2.5 rounded-full relative transition-colors ${showLabels ? 'bg-worldview-cyan' : 'bg-[#1E3050]'}`}>
+                  <div className={`absolute top-0.5 w-1.5 h-1.5 rounded-full bg-worldview-bg transition-all ${showLabels ? 'left-3' : 'left-0.5'}`} />
+                </div>
+              </div>
+            </div>
           </LayerSection>
 
           {/* Bottom Stats */}

@@ -6,11 +6,12 @@ import {
   PointPrimitiveCollection, BillboardCollection, NearFarScalar,
   Primitive, GeometryInstance, PolylineGeometry, PolylineColorAppearance,
   ColorGeometryInstanceAttribute,
-  HeadingPitchRange, Matrix4, Cartographic, Ellipsoid, BoundingSphere,
+  HeadingPitchRange, Cartographic, Ellipsoid, BoundingSphere,
   Ion, createGooglePhotorealistic3DTileset, GoogleMaps,
   Math as CesiumMath,
   ScreenSpaceEventHandler, ScreenSpaceEventType, defined,
   WebMapTileServiceImageryProvider, ImageryLayer, GeographicTilingScheme,
+  UrlTemplateImageryProvider, WebMercatorTilingScheme,
   PolygonGeometry, PolygonHierarchy, PerInstanceColorAppearance, GroundPrimitive,
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
@@ -27,6 +28,8 @@ import { useStore } from './store'
 import { PostProcessManager } from './systems/PostProcessing'
 import { TrafficParticleSystem } from './systems/TrafficParticles'
 import { CCTVProjectionSystem } from './systems/CCTVProjection'
+import { CCTVViewer } from './components/CCTVViewer'
+import { createTrafficSession, getTrafficTileUrl, TrafficDataSampler } from './adapters/trafficTiles'
 
 Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN
 GoogleMaps.defaultApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY
@@ -49,7 +52,7 @@ const COL_SAT_HEO  = Color.fromCssColorString('#D97736')  // orange — HEO > 35
 const COL_SEISMIC_LO = Color.fromCssColorString('#D97736') // orange M2.5–4.9
 const COL_SEISMIC_HI = Color.fromCssColorString('#DD4444') // red    M5+
 const COL_LABEL    = Color.fromCssColorString('#C8D8E8')  // pale blue-white
-const COL_BG       = new Color(0.02, 0.04, 0.1, 0.75)
+const COL_BG       = new Color(0.02, 0.04, 0.1, 0.82)
 
 const MILITARY_SQUAWKS = new Set(['7500', '7600', '7700'])
 
@@ -231,6 +234,20 @@ function createSeismicDotImage(size = 16): string {
   return canvas.toDataURL()
 }
 
+// Crosshair reticle — corner brackets from crosshair.svg (viewBox 0 0 256 256)
+const CROSSHAIR_PATH = 'M216,48V88a8,8,0,0,1-16,0V56H168a8,8,0,0,1,0-16h40A8.00008,8.00008,0,0,1,216,48ZM88,200H56V168a8,8,0,0,0-16,0v40a8.00039,8.00039,0,0,0,8,8H88a8,8,0,0,0,0-16Zm120-40a8.00039,8.00039,0,0,0-8,8v32H168a8,8,0,0,0,0,16h40a8.00039,8.00039,0,0,0,8-8V168A8.00039,8.00039,0,0,0,208,160ZM88,40H48a8.00008,8.00008,0,0,0-8,8V88a8,8,0,0,0,16,0V56H88a8,8,0,0,0,0-16Z'
+
+function createCrosshairImage(size = 64): string {
+  const canvas = document.createElement('canvas')
+  canvas.width = size; canvas.height = size
+  const ctx = canvas.getContext('2d')!
+  const scale = size / 256
+  ctx.scale(scale, scale)
+  ctx.fillStyle = '#00f0ff'
+  ctx.fill(new Path2D(CROSSHAIR_PATH))
+  return canvas.toDataURL()
+}
+
 function App() {
   const cesiumContainer = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
@@ -259,6 +276,11 @@ function App() {
   const aqLabelsRef        = useRef<LabelCollection | null>(null)
   const weatherPointsRef   = useRef<PointPrimitiveCollection | null>(null)
   const weatherLabelsRef   = useRef<LabelCollection | null>(null)
+  const seismicLabelsRef   = useRef<LabelCollection | null>(null)
+  const fireLabelsRef      = useRef<LabelCollection | null>(null)
+  const cctvLabelsRef      = useRef<LabelCollection | null>(null)
+  const crosshairBbRef     = useRef<BillboardCollection | null>(null)
+  const crosshairImageRef  = useRef<string | null>(null)
   const nightLightsLayerRef = useRef<ImageryLayer | null>(null)
   const gpsJamPrimRef = useRef<Primitive | null>(null)
 
@@ -276,6 +298,9 @@ function App() {
 
   const postProcessRef = useRef<PostProcessManager | null>(null)
   const trafficSystemRef = useRef<TrafficParticleSystem | null>(null)
+  const trafficLayerRef = useRef<ImageryLayer | null>(null)
+  const trafficSamplerRef = useRef<TrafficDataSampler | null>(null)
+  const trafficSessionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const cctvSystemRef = useRef<CCTVProjectionSystem | null>(null)
 
   const { flights, militaryFlights, vessels, seismicEvents, wildfires, sats, airQuality, weather, gpsJam, roadSegments, cctvFeeds } = useEntities()
@@ -287,6 +312,8 @@ function App() {
   const aviationFilters = useStore((s) => s.aviationFilters)
   const trafficDensity = useStore((s) => s.trafficDensity)
   const trafficMaxParticles = useStore((s) => s.trafficMaxParticles)
+  const cctvViewerFeed = useStore((s) => s.cctvViewerFeed)
+  const setCctvViewerFeed = useStore((s) => s.setCctvViewerFeed)
 
   useKeyboard(viewerRef)
 
@@ -345,6 +372,12 @@ function App() {
     // Prevent camera from clipping through the globe when zooming in close
     viewer.scene.screenSpaceCameraController.minimumZoomDistance = 100  // 100m minimum altitude
 
+    // Prevent blue pop-in/clipping at close zoom with 3D tiles
+    viewer.scene.logarithmicDepthBuffer = true
+    viewer.scene.globe.baseColor = new Color(0.008, 0.016, 0.04, 1.0)  // match scene bg — no blue
+    viewer.scene.globe.depthTestAgainstTerrain = false
+    viewer.scene.globe.showGroundAtmosphere = false
+
     viewerRef.current = viewer
 
     createGooglePhotorealistic3DTileset()
@@ -369,8 +402,13 @@ function App() {
     const aql = new LabelCollection()
     const wxp = new PointPrimitiveCollection()
     const wxl = new LabelCollection()
+    const seisL = new LabelCollection()
+    const firL = new LabelCollection()
+    const cctvL = new LabelCollection()
 
-    for (const c of [fb, fl, vp, vl, sp, spulse, fip, satp, satl, mb, ml, aqp, aql, wxp, wxl]) {
+    const xhairBb = new BillboardCollection()
+
+    for (const c of [fb, fl, vp, vl, sp, spulse, fip, satp, satl, mb, ml, aqp, aql, wxp, wxl, seisL, firL, cctvL, xhairBb]) {
       viewer.scene.primitives.add(c)
     }
 
@@ -389,6 +427,11 @@ function App() {
     aqLabelsRef.current      = aql
     weatherPointsRef.current = wxp
     weatherLabelsRef.current = wxl
+    seismicLabelsRef.current = seisL
+    fireLabelsRef.current    = firL
+    cctvLabelsRef.current    = cctvL
+    crosshairBbRef.current   = xhairBb
+    crosshairImageRef.current = createCrosshairImage(64)
 
     // Pre-render seismic images
     seismicDotImageRef.current  = createSeismicDotImage(16)
@@ -403,6 +446,72 @@ function App() {
     // ── Traffic particle system ──────────────────────────────────────────
     const trafficSys = new TrafficParticleSystem(viewer)
     trafficSystemRef.current = trafficSys
+
+    // ── Google Traffic tile overlay + data sampler ───────────────────────
+    const initTrafficTiles = async () => {
+      try {
+        const sess = await createTrafficSession()
+        console.info('[Traffic] Session created, token:', sess.session.slice(0, 20) + '...', 'expiry:', new Date(sess.expiry).toISOString())
+
+        const tileUrl = getTrafficTileUrl(sess.session)
+        console.info('[Traffic] Tile URL template:', tileUrl)
+
+        // Add CesiumJS imagery layer (Web Mercator tiles on 3D globe)
+        const provider = new UrlTemplateImageryProvider({
+          url: tileUrl,
+          minimumLevel: 0,
+          maximumLevel: 18,
+          tilingScheme: new WebMercatorTilingScheme(),
+          hasAlphaChannel: true,
+          credit: 'Google Traffic',
+        })
+        const layer = viewer.imageryLayers.addImageryProvider(provider)
+        layer.alpha = 0.7
+        layer.show = useStore.getState().activeLayers.includes('traffic')
+        trafficLayerRef.current = layer
+
+        // Create sampler and attach to particle system
+        const sampler = new TrafficDataSampler(sess.session)
+        trafficSamplerRef.current = sampler
+        trafficSys.setSampler(sampler)
+
+        // Schedule session refresh (60s before expiry)
+        const scheduleRefresh = (expiry: number) => {
+          const delay = Math.max(expiry - Date.now() - 60_000, 60_000)
+          trafficSessionTimerRef.current = setTimeout(async () => {
+            try {
+              const newSess = await createTrafficSession()
+              console.info('[Traffic] Session refreshed')
+              sampler.updateSession(newSess.session)
+              if (trafficLayerRef.current) {
+                const wasVisible = trafficLayerRef.current.show
+                viewer.imageryLayers.remove(trafficLayerRef.current)
+                const newProvider = new UrlTemplateImageryProvider({
+                  url: getTrafficTileUrl(newSess.session),
+                  minimumLevel: 0,
+                  maximumLevel: 18,
+                  tilingScheme: new WebMercatorTilingScheme(),
+                  hasAlphaChannel: true,
+                  credit: 'Google Traffic',
+                })
+                const newLayer = viewer.imageryLayers.addImageryProvider(newProvider)
+                newLayer.alpha = 0.7
+                newLayer.show = wasVisible
+                trafficLayerRef.current = newLayer
+              }
+              scheduleRefresh(newSess.expiry)
+            } catch (err) {
+              console.warn('[Traffic] Session refresh failed:', err)
+              scheduleRefresh(Date.now() + 5 * 60_000)
+            }
+          }, delay)
+        }
+        scheduleRefresh(sess.expiry)
+      } catch (err) {
+        console.error('[Traffic] Failed to create Google traffic session:', err)
+      }
+    }
+    initTrafficTiles()
 
     // ── CCTV projection system ───────────────────────────────────────────
     const cctvSys = new CCTVProjectionSystem(viewer)
@@ -475,10 +584,77 @@ function App() {
       }
     }, ScreenSpaceEventType.LEFT_CLICK)
 
+    // ── Cursor geo position — real-time lat/lon under mouse pointer ──
+    handler.setInputAction((movement: any) => {
+      const ellipsoid = viewer.scene.globe.ellipsoid
+      const cartesian = viewer.camera.pickEllipsoid(movement.endPosition, ellipsoid)
+      if (cartesian) {
+        const carto = Cartographic.fromCartesian(cartesian)
+        useStore.getState().setCursorGeo({
+          lat: CesiumMath.toDegrees(carto.latitude),
+          lon: CesiumMath.toDegrees(carto.longitude),
+        })
+      } else {
+        useStore.getState().setCursorGeo(null)
+      }
+    }, ScreenSpaceEventType.MOUSE_MOVE)
+
+    // ── Camera move listener — update cameraBbox for viewport-based data ──
+    const updateCameraBbox = () => {
+      try {
+        const camera = viewer.camera
+        const canvas = viewer.scene.canvas
+        const ellipsoid = viewer.scene.globe.ellipsoid
+        const height = camera.positionCartographic.height
+
+        // Get corner positions in radians
+        const corners = [
+          camera.pickEllipsoid(new Cartesian2(0, 0), ellipsoid),
+          camera.pickEllipsoid(new Cartesian2(canvas.clientWidth, 0), ellipsoid),
+          camera.pickEllipsoid(new Cartesian2(0, canvas.clientHeight), ellipsoid),
+          camera.pickEllipsoid(new Cartesian2(canvas.clientWidth, canvas.clientHeight), ellipsoid),
+        ]
+
+        const validCorners = corners.filter(Boolean)
+        if (validCorners.length >= 2) {
+          const cartos = validCorners.map(c => Cartographic.fromCartesian(c!, ellipsoid))
+          const lats = cartos.map(c => CesiumMath.toDegrees(c.latitude))
+          const lons = cartos.map(c => CesiumMath.toDegrees(c.longitude))
+          const bbox: [number, number, number, number] = [
+            Math.min(...lats), Math.min(...lons),
+            Math.max(...lats), Math.max(...lons),
+          ]
+          useStore.getState().setCameraBbox(bbox, height)
+        } else {
+          // Zoomed out (corners point to space) — use camera sub-point with estimated extent
+          const centerLat = CesiumMath.toDegrees(camera.positionCartographic.latitude)
+          const centerLon = CesiumMath.toDegrees(camera.positionCartographic.longitude)
+          // Rough: at 3700km alt, visible extent ~60° in each direction
+          const extent = Math.min(height / 100_000, 80)
+          const bbox: [number, number, number, number] = [
+            Math.max(centerLat - extent, -85),
+            centerLon - extent,
+            Math.min(centerLat + extent, 85),
+            centerLon + extent,
+          ]
+          useStore.getState().setCameraBbox(bbox, height)
+        }
+      } catch {
+        // Ignore — can fail during globe rotation
+      }
+    }
+    viewer.camera.moveEnd.addEventListener(updateCameraBbox)
+    // Initial bbox
+    updateCameraBbox()
+
     return () => {
+      viewer.camera.moveEnd.removeEventListener(updateCameraBbox)
       if (animFrame != null) cancelAnimationFrame(animFrame)
       ppManager.destroy()
       trafficSys.destroy()
+      if (trafficLayerRef.current) viewer.imageryLayers.remove(trafficLayerRef.current)
+      if (trafficSessionTimerRef.current) clearTimeout(trafficSessionTimerRef.current)
+      trafficSamplerRef.current?.clear()
       cctvSys.destroy()
       handler.destroy()
       viewer.destroy()
@@ -497,12 +673,72 @@ function App() {
 
   // ── Label visibility toggle ────────────────────────────────────────────────
   useEffect(() => {
-    const collections = [flightLabelsRef, milLabelsRef, vesselLabelsRef, satLabelsRef]
+    const collections = [flightLabelsRef, milLabelsRef, vesselLabelsRef, satLabelsRef, aqLabelsRef, weatherLabelsRef, seismicLabelsRef, fireLabelsRef, cctvLabelsRef]
     for (const ref of collections) {
       if (ref.current) ref.current.show = showLabels
     }
     viewerRef.current?.scene.requestRender()
   }, [showLabels])
+
+  // ── Crosshair reticle — locks onto selected entity position ────────────────
+  const selectedEntity = useStore((s) => s.selectedEntity)
+  useEffect(() => {
+    const xhair = crosshairBbRef.current
+    const img = crosshairImageRef.current
+    if (!xhair || !img) return
+
+    xhair.removeAll()
+
+    if (!selectedEntity) {
+      viewerRef.current?.scene.requestRender()
+      return
+    }
+
+    // Re-lookup latest data from live refs so crosshair follows moving entities
+    const { type, data: origData } = selectedEntity
+    let d = origData
+    if (type === 'flight') {
+      const key = origData.icao24
+      d = flightsRef.current.get(key) ?? milFlightsRef.current.get(key) ?? origData
+    } else if (type === 'vessel') {
+      d = vesselsRef.current.get(origData.mmsi) ?? origData
+    } else if (type === 'satellite') {
+      d = satsDataRef.current.find((s: any) => s.id === origData.id) ?? origData
+    }
+
+    let lon: number | undefined
+    let lat: number | undefined
+    let alt = 0
+
+    if (type === 'flight') {
+      lon = d.longitude; lat = d.latitude
+      alt = d.baro_altitude ?? d.geo_altitude ?? 0
+      if (alt < 0 || alt > 20_000) alt = 0
+    } else if (type === 'vessel') {
+      lon = d.longitude; lat = d.latitude
+    } else if (type === 'satellite') {
+      lon = d.longitude; lat = d.latitude
+      alt = (d.altitudeKm ?? 0) * 1000
+    } else {
+      // seismic, wildfire, cctv, airq, weather — static position from origData
+      lon = d.longitude; lat = d.latitude
+    }
+
+    if (lon == null || lat == null) return
+
+    const pos = Cartesian3.fromDegrees(lon, lat, alt)
+    xhair.add({
+      position: pos,
+      image: img,
+      scale: 1.0,
+      color: Color.fromCssColorString('#00f0ff'),
+      horizontalOrigin: HorizontalOrigin.CENTER,
+      verticalOrigin: VerticalOrigin.CENTER,
+      sizeInMeters: false,
+    })
+
+    viewerRef.current?.scene.requestRender()
+  }, [selectedEntity, flights, militaryFlights, vessels, sats, seismicEvents, wildfires])
 
   // ── Traffic system sync ────────────────────────────────────────────────────
   useEffect(() => {
@@ -518,6 +754,14 @@ function App() {
     trafficSystemRef.current?.setMaxParticles(trafficMaxParticles)
   }, [trafficMaxParticles])
 
+  // Toggle Google Traffic tile overlay visibility with traffic layer
+  const wantTraffic = activeLayers.includes('traffic')
+  useEffect(() => {
+    if (trafficLayerRef.current) {
+      trafficLayerRef.current.show = wantTraffic
+    }
+  }, [wantTraffic])
+
   // ── CCTV system sync ─────────────────────────────────────────────────────
   useEffect(() => {
     console.info(`[CCTV Sync] cctvFeeds=${cctvFeeds.length}, system=${!!cctvSystemRef.current}`)
@@ -526,6 +770,38 @@ function App() {
     } else if (cctvSystemRef.current && cctvFeeds.length === 0) {
       cctvSystemRef.current.setFeeds([])
     }
+  }, [cctvFeeds])
+
+  // ── CCTV labels sync ──────────────────────────────────────────────────────
+  useEffect(() => {
+    const cl = cctvLabelsRef.current
+    if (!cl) return
+
+    cl.removeAll()
+
+    for (const feed of cctvFeeds) {
+      if (feed.latitude == null || feed.longitude == null) continue
+      const pos = Cartesian3.fromDegrees(feed.longitude, feed.latitude, 0)
+      const name = (feed.name ?? '').length > 15 ? (feed.name as string).slice(0, 15) + '…' : (feed.name ?? '')
+      cl.add({
+        position: pos,
+        text: name,
+        font: 'bold 11px "JetBrains Mono", monospace',
+        fillColor: Color.fromCssColorString('#00F0FF'),
+        outlineColor: Color.BLACK,
+        outlineWidth: 3,
+        style: LabelStyle.FILL_AND_OUTLINE,
+        horizontalOrigin: HorizontalOrigin.LEFT,
+        verticalOrigin: VerticalOrigin.CENTER,
+        pixelOffset: new Cartesian2(10, 0),
+        showBackground: true,
+        backgroundColor: COL_BG,
+        translucencyByDistance: new NearFarScalar(1e4, 1.0, 2e6, 0.0),
+        show: useStore.getState().showLabels,
+      })
+    }
+
+    viewerRef.current?.scene.requestRender()
   }, [cctvFeeds])
 
   // ── Camera: fly to selected city (Nominatim smart centering) ────────────────
@@ -694,22 +970,6 @@ function App() {
   // ── Track entity: follow selected flight/satellite ─────────────────────────
   const trackInitRef = useRef<string | null>(null) // key of entity we've already flown to
 
-  // Helper: use lookAt to compute correct camera position aimed at target,
-  // then immediately release the transform so primitives stay in world coords.
-  function pointCameraAt(viewer: Viewer, target: Cartesian3, offset: HeadingPitchRange) {
-    viewer.camera.lookAt(target, offset)
-    // Capture world-coordinate camera state before releasing transform
-    const posWC = Cartesian3.clone(viewer.camera.positionWC)
-    const dirWC = Cartesian3.clone(viewer.camera.directionWC)
-    const upWC  = Cartesian3.clone(viewer.camera.upWC)
-    // Release the reference frame lock
-    viewer.camera.lookAtTransform(Matrix4.IDENTITY)
-    // Apply the computed world-coordinate position/orientation
-    viewer.camera.position  = posWC
-    viewer.camera.direction = dirWC
-    viewer.camera.up        = upWC
-  }
-
   useEffect(() => {
     const viewer = viewerRef.current
     if (!viewer || viewer.isDestroyed()) return
@@ -733,11 +993,9 @@ function App() {
         lat = f.latitude
         const rawAlt = f.baro_altitude ?? f.geo_altitude ?? 0
         alt = (rawAlt > 0 && rawAlt < 20_000) ? rawAlt : 0
-        heading = f.true_track ?? 0
-        // Auto-adjust range based on altitude: higher flights get wider view
-        range = Math.max(8_000, alt * 1.5 + 5_000)
-        range = Math.min(range, 50_000) // cap at 50km
-        camPitchDeg = -45
+        heading = 0           // north-up — camera stays fixed, plane moves beneath
+        range = 8_000         // 8km above the plane for tight top-down view
+        camPitchDeg = -90     // straight down
       }
     } else if (trackedEntity.type === 'vessel') {
       const v = vesselsRef.current.get(Number(trackedEntity.key))
@@ -745,9 +1003,9 @@ function App() {
         lon = v.longitude
         lat = v.latitude
         alt = 0
-        heading = v.course ?? 0
-        range = 3_000     // 3km for surface vessels — close enough to see detail
-        camPitchDeg = -40 // shallower angle to see horizon + ground
+        heading = 0           // north-up fixed camera
+        range = 3_000         // 3km overhead for vessels
+        camPitchDeg = -90     // straight down
       }
     } else if (trackedEntity.type === 'satellite') {
       const s = satsDataRef.current.find(s => s.id === trackedEntity.key)
@@ -755,39 +1013,35 @@ function App() {
         lon = s.longitude
         lat = s.latitude
         alt = s.altitudeKm * 1000
-        range = Math.min(alt * 0.5, 500_000) // half of orbital altitude, capped at 500km
+        range = Math.min(alt * 0.5, 500_000)
         camPitchDeg = -55
       }
     }
 
     if (lon == null || lat == null) return
 
-    const target = Cartesian3.fromDegrees(lon, lat, alt)
-    const camHeading = (trackedEntity.type === 'flight' || trackedEntity.type === 'vessel')
-      ? CesiumMath.toRadians(heading)
-      : 0
+    const camHeading = CesiumMath.toRadians(heading)
     const camPitch = CesiumMath.toRadians(camPitchDeg)
-    const offset = new HeadingPitchRange(camHeading, camPitch, range)
+
+    // Camera height = entity altitude + range (camera is "range" meters above the entity)
+    const camAlt = alt + range
 
     const isFirstTrack = trackInitRef.current !== trackedEntity.key
 
     if (isFirstTrack) {
-      // Initial acquisition: animated flyTo
+      // Initial acquisition: animated flyTo directly above the entity
       trackInitRef.current = trackedEntity.key
       viewer.camera.flyTo({
-        destination: Cartesian3.fromDegrees(lon, lat, alt + range),
+        destination: Cartesian3.fromDegrees(lon, lat, camAlt),
         orientation: { heading: camHeading, pitch: camPitch, roll: 0 },
         duration: 1.5,
-        complete: () => {
-          if (!viewer.isDestroyed() && trackInitRef.current === trackedEntity.key) {
-            pointCameraAt(viewer, target, offset)
-            viewer.scene.requestRender()
-          }
-        },
       })
     } else {
-      // Subsequent updates: reposition camera smoothly at target
-      pointCameraAt(viewer, target, offset)
+      // Subsequent updates: snap camera directly above entity
+      viewer.camera.setView({
+        destination: Cartesian3.fromDegrees(lon, lat, camAlt),
+        orientation: { heading: camHeading, pitch: camPitch, roll: 0 },
+      })
       viewer.scene.requestRender()
     }
   }, [trackedEntity, flights, militaryFlights, vessels, sats])
@@ -846,11 +1100,11 @@ function App() {
         const label = fl.add({
           position: pos,
           text: formatFlightLabel(flight, icao),
-          font: '10px "JetBrains Mono", monospace',
+          font: 'bold 11px "JetBrains Mono", monospace',
           fillColor: COL_LABEL,
           id: entityId,
           style: LabelStyle.FILL_AND_OUTLINE,
-          outlineWidth: 2,
+          outlineWidth: 3,
           outlineColor: Color.BLACK,
           horizontalOrigin: HorizontalOrigin.LEFT,
           verticalOrigin: VerticalOrigin.CENTER,
@@ -998,11 +1252,11 @@ function App() {
         const label = ml.add({
           position: pos,
           text: formatFlightLabel(flight, icao),
-          font: '10px "JetBrains Mono", monospace',
+          font: 'bold 11px "JetBrains Mono", monospace',
           fillColor: COL_SQUAWK,
           id: entityId,
           style: LabelStyle.FILL_AND_OUTLINE,
-          outlineWidth: 2,
+          outlineWidth: 3,
           outlineColor: Color.BLACK,
           horizontalOrigin: HorizontalOrigin.LEFT,
           verticalOrigin: VerticalOrigin.CENTER,
@@ -1070,15 +1324,17 @@ function App() {
         const label = vl.add({
           position: pos,
           text: vessel.name || String(mmsi),
-          font: '9px "JetBrains Mono", monospace',
+          font: 'bold 11px "JetBrains Mono", monospace',
           fillColor: col,
           id: entityId,
           style: LabelStyle.FILL_AND_OUTLINE,
-          outlineWidth: 2,
+          outlineWidth: 3,
           outlineColor: Color.BLACK,
           horizontalOrigin: HorizontalOrigin.LEFT,
           verticalOrigin: VerticalOrigin.CENTER,
           pixelOffset: new Cartesian2(10, 0),
+          showBackground: true,
+          backgroundColor: COL_BG,
           scaleByDistance: new NearFarScalar(1e3, 1.0, 3e6, 0.35),
         })
         existing.set(mmsi, { billboard, label })
@@ -1096,15 +1352,17 @@ function App() {
     viewerRef.current?.scene.requestRender()
   }, [vessels])
 
-  // ── Seismic sync (dots + pulse rings) ────────────────────────────────────
+  // ── Seismic sync (dots + pulse rings + labels) ──────────────────────────
   useEffect(() => {
     const sp = seismicPointsRef.current
     const spulse = seismicPulseRef.current
+    const sl = seismicLabelsRef.current
     if (!sp) return
 
     // Full replace — seismic events list changes as a whole
     sp.removeAll()
     if (spulse) spulse.removeAll()
+    if (sl) sl.removeAll()
     seismicIndexMap.current.clear()
     seismicPulseList.current = []
 
@@ -1129,6 +1387,27 @@ function App() {
         scaleByDistance: new NearFarScalar(1e4, 1.5, 2e7, 0.8),
       })
       seismicIndexMap.current.set(evt.id, point)
+
+      // Label: M{magnitude} {depth}km
+      if (sl) {
+        const depth = evt.depth != null ? Math.round(evt.depth) : 0
+        sl.add({
+          position: pos,
+          text: `M${mag.toFixed(1)} ${depth}km`,
+          font: 'bold 11px "JetBrains Mono", monospace',
+          fillColor: Color.fromCssColorString('#FFB347'),
+          outlineColor: Color.BLACK,
+          outlineWidth: 3,
+          style: LabelStyle.FILL_AND_OUTLINE,
+          horizontalOrigin: HorizontalOrigin.LEFT,
+          verticalOrigin: VerticalOrigin.CENTER,
+          pixelOffset: new Cartesian2(10, 0),
+          showBackground: true,
+          backgroundColor: COL_BG,
+          translucencyByDistance: new NearFarScalar(5e5, 1.0, 2e7, 0.0),
+          show: useStore.getState().showLabels,
+        })
+      }
 
       // Animated pulse ring billboard
       if (spulse && ringImg) {
@@ -1161,9 +1440,10 @@ function App() {
     viewerRef.current?.scene.requestRender()
   }, [seismicEvents])
 
-  // ── Wildfire sync ─────────────────────────────────────────────────────────
+  // ── Wildfire sync (billboards + labels) ──────────────────────────────────
   useEffect(() => {
     const fip = fireBillboardsRef.current
+    const firLabels = fireLabelsRef.current
     if (!fip) return
 
     if (!fireImageRef.current) {
@@ -1172,6 +1452,7 @@ function App() {
     const fireImg = fireImageRef.current
 
     fip.removeAll()
+    if (firLabels) firLabels.removeAll()
     fireIndexMap.current.clear()
 
     // Cap at 15k fires — beyond that, skip low-confidence detections
@@ -1199,6 +1480,27 @@ function App() {
         translucencyByDistance: new NearFarScalar(1e5, 1.0, 2e7, 0.25),
       })
       fireIndexMap.current.set(fireKey, billboard)
+
+      // Label: FRP {frp}MW or {brightness}K
+      if (firLabels) {
+        const text = fire.frp > 0 ? `FRP ${Math.round(fire.frp)}MW` : `${Math.round(fire.brightness ?? 0)}K`
+        firLabels.add({
+          position: pos,
+          text,
+          font: 'bold 11px "JetBrains Mono", monospace',
+          fillColor: Color.fromCssColorString('#FF8C42'),
+          outlineColor: Color.BLACK,
+          outlineWidth: 3,
+          style: LabelStyle.FILL_AND_OUTLINE,
+          horizontalOrigin: HorizontalOrigin.LEFT,
+          verticalOrigin: VerticalOrigin.CENTER,
+          pixelOffset: new Cartesian2(10, 0),
+          showBackground: true,
+          backgroundColor: COL_BG,
+          translucencyByDistance: new NearFarScalar(3e5, 1.0, 8e6, 0.0),
+          show: useStore.getState().showLabels,
+        })
+      }
     }
 
     viewerRef.current?.scene.requestRender()
@@ -1254,16 +1556,18 @@ function App() {
         })
         const label = satl.add({
           position: pos,
-          text: `[SAT-${sat.id}] ${sat.name.slice(0, 12)}`,
-          font: '10px "JetBrains Mono", monospace',
+          text: `SAT-${sat.id}`,
+          font: 'bold 11px "JetBrains Mono", monospace',
           fillColor: col,
           id: entityId,
           style: LabelStyle.FILL_AND_OUTLINE,
-          outlineWidth: 2,
+          outlineWidth: 3,
           outlineColor: Color.BLACK,
           horizontalOrigin: HorizontalOrigin.LEFT,
           verticalOrigin: VerticalOrigin.CENTER,
           pixelOffset: new Cartesian2(10, 0),
+          showBackground: true,
+          backgroundColor: COL_BG,
           scaleByDistance: new NearFarScalar(1e5, 1.2, 4e7, 0.6),
           translucencyByDistance: new NearFarScalar(1e5, 1.0, 4e7, 0.8),
         })
@@ -1433,15 +1737,17 @@ function App() {
       aql.add({
         position: pos,
         text: `AQI ${station.aqi}`,
-        font: '9px "JetBrains Mono", monospace',
+        font: 'bold 11px "JetBrains Mono", monospace',
         fillColor: color,
         id: { type: 'airq', key: String(station.id) },
         style: LabelStyle.FILL_AND_OUTLINE,
-        outlineWidth: 2,
+        outlineWidth: 3,
         outlineColor: Color.BLACK,
         horizontalOrigin: HorizontalOrigin.LEFT,
         verticalOrigin: VerticalOrigin.CENTER,
-        pixelOffset: new Cartesian2(8, 0),
+        pixelOffset: new Cartesian2(10, 0),
+        showBackground: true,
+        backgroundColor: COL_BG,
         scaleByDistance: new NearFarScalar(1e4, 1.0, 1e7, 0.4),
         translucencyByDistance: new NearFarScalar(1e4, 1.0, 2e7, 0.0),
       })
@@ -1496,15 +1802,17 @@ function App() {
       wxl.add({
         position: pos,
         text: `${temp}° ${label} ${wind}kh`,
-        font: '9px "JetBrains Mono", monospace',
+        font: 'bold 11px "JetBrains Mono", monospace',
         fillColor: color,
         id: { type: 'weather', key: wp.id },
         style: LabelStyle.FILL_AND_OUTLINE,
-        outlineWidth: 2,
+        outlineWidth: 3,
         outlineColor: Color.BLACK,
         horizontalOrigin: HorizontalOrigin.LEFT,
         verticalOrigin: VerticalOrigin.CENTER,
-        pixelOffset: new Cartesian2(8, 0),
+        pixelOffset: new Cartesian2(10, 0),
+        showBackground: true,
+        backgroundColor: COL_BG,
         scaleByDistance: new NearFarScalar(5e5, 1.0, 1e7, 0.4),
         translucencyByDistance: new NearFarScalar(5e5, 1.0, 2e7, 0.0),
       })
@@ -1650,6 +1958,9 @@ function App() {
 
       {cleanUI && <CleanUIToggle />}
       <GpsModal onNavigate={handleGpsNavigate} />
+      {cctvViewerFeed && (
+        <CCTVViewer feed={cctvViewerFeed} onClose={() => setCctvViewerFeed(null)} />
+      )}
     </div>
   )
 }

@@ -7,8 +7,8 @@ import { fetchSatellites, propagateAll, type SatelliteState } from '../adapters/
 import { fetchAirQuality, type AQStation } from '../adapters/airquality'
 import { fetchWeather, type WeatherPoint } from '../adapters/weather'
 import { fetchGpsJamData, type GpsJamCell } from '../adapters/gpsjam'
-import { fetchRoadNetwork, type RoadSegment } from '../adapters/traffic'
-import { getCCTVFeeds, type CCTVFeed } from '../adapters/cctv'
+import { fetchRoadNetworkByBbox, type RoadSegment } from '../adapters/traffic'
+import { loadGlobalCCTVFeeds, type CCTVFeed } from '../adapters/cctv'
 import { useStore } from '../store'
 
 export function useEntities() {
@@ -24,7 +24,6 @@ export function useEntities() {
   const [roadSegments, setRoadSegments] = useState<RoadSegment[]>([])
   const [cctvFeeds, setCctvFeeds] = useState<CCTVFeed[]>([])
   const { activeLayers } = useStore()
-  const selectedCity = useStore((s) => s.selectedCity)
   const aisAdapterRef = useRef<AISAdapter | null>(null)
 
   // ── Data caches: persist across toggle cycles for instant restore ────────
@@ -298,48 +297,47 @@ export function useEntities() {
     return () => clearInterval(interval)
   }, [wantGpsJam])
 
-  // ── Traffic (Overpass) — fetch road network per city ────────────────────
+  // ── Traffic (Overpass) — fetch road network for camera viewport ─────────
+  const cameraBbox = useStore((s) => s.cameraBbox)
+  const cameraHeight = useStore((s) => s.cameraHeight)
+
   useEffect(() => {
     if (!wantTraffic) {
       setRoadSegments([])
       return
     }
 
+    // Only fetch roads when zoomed in enough (< ~50km altitude)
+    if (!cameraBbox || cameraHeight > 50_000) {
+      setRoadSegments([])
+      return
+    }
+
     let cancelled = false
     ;(async () => {
-      const segments = await fetchRoadNetwork(selectedCity)
+      const segments = await fetchRoadNetworkByBbox(cameraBbox, `viewport`)
       if (!cancelled) setRoadSegments(segments)
     })()
 
     return () => { cancelled = true }
-  }, [wantTraffic, selectedCity])
+    // Stringify bbox to avoid re-renders from array identity changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantTraffic, cameraBbox?.[0], cameraBbox?.[1], cameraBbox?.[2], cameraBbox?.[3], cameraHeight > 50_000])
 
-  // ── CCTV feeds — Windy Webcams API, nearby search per city ─────────────
+  // ── CCTV feeds — global preload from Windy webcam API ──────────────────
   useEffect(() => {
     if (!wantCctv) {
       setCctvFeeds([])
       return
     }
 
-    let cancelled = false
-    ;(async () => {
-      console.info(`[CCTV useEntities] Fetching feeds for "${selectedCity}"...`)
-      const feeds = await getCCTVFeeds(selectedCity)
-      console.info(`[CCTV useEntities] Got ${feeds.length} feeds, cancelled=${cancelled}`)
-      if (!cancelled) {
-        console.info(`[CCTV useEntities] Setting state with ${feeds.length} feeds`)
-        setCctvFeeds(feeds)
-      }
-    })()
+    // Start (or resume) global webcam load — feeds stream in via callback
+    const unsubscribe = loadGlobalCCTVFeeds((feeds) => {
+      setCctvFeeds(feeds)
+    })
 
-    // Re-fetch every 8 minutes (Windy free tier tokens expire at 10 min)
-    const interval = setInterval(async () => {
-      const feeds = await getCCTVFeeds(selectedCity)
-      if (!cancelled) setCctvFeeds(feeds)
-    }, 8 * 60_000)
-
-    return () => { cancelled = true; clearInterval(interval) }
-  }, [wantCctv, selectedCity])
+    return unsubscribe
+  }, [wantCctv])
 
   return { flights, militaryFlights, vessels, seismicEvents, wildfires, sats, airQuality, weather, gpsJam, roadSegments, cctvFeeds }
 }

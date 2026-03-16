@@ -32,6 +32,8 @@ export async function proxyRequest(req: Request, config: ProxyConfig): Promise<R
   // Forward the request
   const headers = new Headers(req.headers)
   headers.delete('host')
+  headers.delete('origin')
+  headers.delete('referer')
   if (config.extraHeaders) {
     for (const [k, v] of Object.entries(config.extraHeaders)) {
       headers.set(k, v)

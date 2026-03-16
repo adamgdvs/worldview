@@ -1,6 +1,7 @@
-import { X, Play, Pause } from 'lucide-react'
-import { useState } from 'react'
+import { X } from 'lucide-react'
+import { useState, useEffect } from 'react'
 import { useStore, type ShaderParams } from '../store'
+import { fetchCCTVSnapshot } from '../adapters/cctv'
 import { CollapsibleSection } from './ui/CollapsibleSection'
 import { Slider } from './ui/Slider'
 
@@ -26,58 +27,26 @@ export function SidebarRight() {
 // ─── Control Stack ──────────────────────────────────────────────────────────
 
 function ControlStack() {
-  const [playing, setPlaying] = useState(false)
   const activeMode = useStore((s) => s.activeMode)
   const shaderParams = useStore((s) => s.shaderParams)
   const setShaderParam = useStore((s) => s.setShaderParam)
   const hudLayout = useStore((s) => s.hudLayout)
   const setHudLayout = useStore((s) => s.setHudLayout)
   const toggleCleanUI = useStore((s) => s.toggleCleanUI)
+  const showLabels = useStore((s) => s.showLabels)
+  const toggleLabels = useStore((s) => s.toggleLabels)
 
   // Mode-specific slider config
   const modeSliders = getModeSliders(activeMode)
 
   return (
     <div className="flex flex-col gap-2">
-      {/* MOVE */}
-      <div className="glass-panel flex items-center justify-between px-3 py-2">
-        <span className="text-[9px] text-[#5a7a9a] font-bold tracking-[2px] uppercase">MOVE</span>
-        <button
-          onClick={() => setPlaying(!playing)}
-          className="text-[#5a7a9a] hover:text-worldview-cyan transition-colors border border-worldview-border/40 rounded px-1.5 py-0.5"
-        >
-          {playing ? <Pause size={10} /> : <Play size={10} />}
-        </button>
-      </div>
-
-      {/* BLOOM */}
-      <div className="glass-panel px-3 py-2">
-        <div className="flex items-center justify-between">
-          <span className="text-[9px] text-worldview-cyan font-bold tracking-[2px] uppercase">✦ BLOOM</span>
-          <span className="text-[8px] text-[#5a7a9a] font-mono">{shaderParams.bloom}%</span>
-        </div>
-        <div className="mt-1.5">
-          <Slider label="" value={shaderParams.bloom} onChange={(v) => setShaderParam('bloom', v)} />
-        </div>
-      </div>
-
-      {/* SHARPEN */}
-      <div className="glass-panel px-3 py-2">
-        <div className="flex items-center justify-between">
-          <span className="text-[9px] text-worldview-cyan font-bold tracking-[2px] uppercase">🔍 SHARPEN</span>
-          <span className="text-[8px] text-[#5a7a9a] font-mono">{shaderParams.sharpen}%</span>
-        </div>
-        <div className="mt-1.5">
-          <Slider label="" value={shaderParams.sharpen} onChange={(v) => setShaderParam('sharpen', v)} />
-        </div>
-      </div>
-
-      {/* HUD */}
+      {/* DISPLAY (HUD + Labels) */}
       <div className="glass-panel px-3 py-2">
         <div className="flex items-center justify-between mb-1.5">
-          <span className="text-[9px] text-worldview-cyan font-bold tracking-[2px] uppercase">◯ HUD</span>
+          <span className="text-[9px] text-worldview-cyan font-bold tracking-[2px] uppercase">DISPLAY</span>
         </div>
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between mb-1.5">
           <span className="text-[8px] text-[#4a6385] tracking-widest font-bold uppercase">LAYOUT</span>
           <select
             value={hudLayout}
@@ -89,20 +58,16 @@ function ControlStack() {
             <option value="Full">Full</option>
           </select>
         </div>
+        <div
+          className="flex items-center justify-between cursor-pointer hover:bg-white/5 transition-colors py-0.5"
+          onClick={toggleLabels}
+        >
+          <span className="text-[8px] text-[#4a6385] tracking-widest font-bold uppercase">LABELS</span>
+          <div className={`w-5 h-2.5 rounded-full relative transition-colors ${showLabels ? 'bg-worldview-cyan' : 'bg-[#1E3050]'}`}>
+            <div className={`absolute top-0.5 w-1.5 h-1.5 rounded-full bg-worldview-bg transition-all ${showLabels ? 'left-3' : 'left-0.5'}`} />
+          </div>
+        </div>
       </div>
-
-      {/* DETECT */}
-      <div className="glass-panel px-3 py-2">
-        <span className="text-[9px] text-[#5a7a9a] font-bold tracking-[2px] uppercase">DETECT</span>
-      </div>
-
-      {/* CLEAN UI */}
-      <button
-        onClick={toggleCleanUI}
-        className="glass-panel px-3 py-2 text-left hover:bg-white/5 transition-colors"
-      >
-        <span className="text-[9px] text-[#5a7a9a] font-bold tracking-[2px] uppercase">CLEAN UI</span>
-      </button>
 
       {/* PARAMETERS (collapsible) */}
       <div className="glass-panel overflow-hidden">
@@ -122,6 +87,14 @@ function ControlStack() {
           </div>
         </CollapsibleSection>
       </div>
+
+      {/* CLEAN UI */}
+      <button
+        onClick={toggleCleanUI}
+        className="glass-panel px-3 py-2 text-left hover:bg-white/5 transition-colors"
+      >
+        <span className="text-[9px] text-[#5a7a9a] font-bold tracking-[2px] uppercase">CLEAN UI</span>
+      </button>
     </div>
   )
 }
@@ -130,6 +103,11 @@ function ControlStack() {
 
 function getModeSliders(mode: string): Array<{ label: string; key: keyof ShaderParams }> {
   switch (mode) {
+    case 'Normal':
+      return [
+        { label: 'Bloom', key: 'bloom' },
+        { label: 'Sharpen', key: 'sharpen' },
+      ]
     case 'FLIR':
       return [
         { label: 'Sensitivity', key: 'bloom' },
@@ -328,14 +306,61 @@ function WildfireDetail({ d }: { d: any }) {
 }
 
 function CCTVDetail({ d }: { d: any }) {
+  const setCctvViewerFeed = useStore((s) => s.setCctvViewerFeed)
+  const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    setLoading(true)
+    setSnapshotUrl(null)
+    fetchCCTVSnapshot(d).then(url => {
+      setSnapshotUrl(url)
+      setLoading(false)
+    })
+    const interval = setInterval(async () => {
+      const url = await fetchCCTVSnapshot(d)
+      if (url) setSnapshotUrl(url)
+    }, d.refreshInterval ?? 30_000)
+    return () => {
+      clearInterval(interval)
+      if (snapshotUrl?.startsWith('blob:')) URL.revokeObjectURL(snapshotUrl)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [d.id])
+
   return (
     <>
+      {/* Live feed preview — click to open large viewer */}
+      <button
+        onClick={() => setCctvViewerFeed(d)}
+        className="w-full mb-2 border border-worldview-border/30 rounded overflow-hidden bg-black/50 hover:border-worldview-cyan/50 transition-colors cursor-pointer"
+      >
+        {loading ? (
+          <div className="h-28 flex items-center justify-center text-[8px] text-[#5a7a9a] font-mono">
+            LOADING FEED...
+          </div>
+        ) : snapshotUrl ? (
+          <img
+            src={snapshotUrl}
+            alt={d.name}
+            className="w-full h-auto max-h-40 object-cover"
+            crossOrigin="anonymous"
+          />
+        ) : (
+          <div className="h-28 flex items-center justify-center text-[8px] text-[#5a7a9a] font-mono">
+            FEED UNAVAILABLE
+          </div>
+        )}
+        <div className="flex items-center justify-between px-2 py-1 bg-[#0a1628]/80">
+          <span className="text-[7px] text-worldview-cyan font-mono tracking-wider">LIVE</span>
+          <span className="text-[6px] text-[#5a7a9a] font-mono">{new Date().toLocaleTimeString()}</span>
+        </div>
+      </button>
       <Row label="NAME" value={d.name} />
       <Row label="SOURCE" value={d.source} />
       <Row label="CITY" value={d.city} />
       <Row label="LAT" value={d.latitude?.toFixed(4)} />
       <Row label="LON" value={d.longitude?.toFixed(4)} />
-      <Row label="REFRESH" value={d.refreshInterval ? `${d.refreshInterval / 1000}s` : undefined} />
     </>
   )
 }

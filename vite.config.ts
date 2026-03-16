@@ -1,10 +1,13 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import cesium from 'vite-plugin-cesium'
 import tailwindcss from '@tailwindcss/vite'
 import aisWebSocketProxy from './vite-plugin-ais-proxy'
 
-export default defineConfig(() => {
+export default defineConfig(({ mode }) => {
+  // Load .env / .env.local so process.env.VITE_* is available in proxy callbacks
+  const env = loadEnv(mode, process.cwd(), '')
+
   return {
     plugins: [react(), cesium(), tailwindcss(), aisWebSocketProxy()],
     server: {
@@ -59,9 +62,26 @@ export default defineConfig(() => {
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/windy/, ''),
           configure: (proxy) => {
+            const key = env.VITE_WINDY_WEBCAMS_KEY ?? ''
             proxy.on('proxyReq', (proxyReq) => {
-              const key = process.env.VITE_WINDY_WEBCAMS_KEY ?? ''
               if (key) proxyReq.setHeader('x-windy-api-key', key)
+              // Remove origin/referer so Windy sees server-to-server (no domain restriction)
+              proxyReq.removeHeader('origin')
+              proxyReq.removeHeader('referer')
+            })
+          },
+        },
+        // Google Map Tiles API (traffic overlay + data sampling)
+        '/gmap-tiles': {
+          target: 'https://tile.googleapis.com',
+          changeOrigin: true,
+          rewrite: (path: string) => path.replace(/^\/gmap-tiles/, ''),
+          configure: (proxy: any) => {
+            const gmapKey = env.VITE_GOOGLE_MAPS_API_KEY ?? ''
+            proxy.on('proxyReq', (proxyReq: any) => {
+              const url = new URL(proxyReq.path, 'https://tile.googleapis.com')
+              url.searchParams.set('key', gmapKey)
+              proxyReq.path = url.pathname + url.search
             })
           },
         },

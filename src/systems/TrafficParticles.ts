@@ -3,6 +3,7 @@ import {
   PointPrimitiveCollection, Cartesian3, Color, NearFarScalar,
 } from 'cesium'
 import type { RoadSegment } from '../adapters/traffic'
+import type { TrafficDataSampler } from '../adapters/trafficTiles'
 
 interface SegmentMeta {
   segment: RoadSegment
@@ -43,6 +44,8 @@ export class TrafficParticleSystem {
   private density = 0.5
   private maxParticles = 800
   private totalNetworkLength = 0
+  private sampler: TrafficDataSampler | null = null
+  private frameCount = 0
 
   // Endpoint index for segment connectivity
   private endpointIndex: Map<string, number[]> = new Map()
@@ -107,6 +110,10 @@ export class TrafficParticleSystem {
     this.respawn()
   }
 
+  setSampler(sampler: TrafficDataSampler) {
+    this.sampler = sampler
+  }
+
   private respawn() {
     this.collection.removeAll()
     this.particles = []
@@ -153,6 +160,10 @@ export class TrafficParticleSystem {
   update(dt: number) {
     if (!this.particles.length) return
     let needsRender = false
+    this.frameCount++
+
+    // Re-sample traffic levels every ~30 frames (~0.5s at 60fps)
+    const shouldSample = this.sampler && (this.frameCount % 30 === 0)
 
     for (const p of this.particles) {
       const meta = this.segments[p.segIdx]
@@ -206,11 +217,21 @@ export class TrafficParticleSystem {
         }
       }
 
-      // Interpolate position
+      // Interpolate position after advance
       const cp = meta.pairs[p.pairIdx]
       if (!cp) continue
       const lon = cp.lon1 + (cp.lon2 - cp.lon1) * p.t
       const lat = cp.lat1 + (cp.lat2 - cp.lat1) * p.t
+
+      // Sample real traffic data to update speed + color
+      if (shouldSample) {
+        const level = this.sampler!.sampleTrafficLevel(lat, lon)
+        if (level !== null) {
+          p.speed = 0.0001 + level * 0.0007
+          p.primitive.color = speedColor(level)
+        }
+      }
+
       p.primitive.position = Cartesian3.fromDegrees(lon, lat, 5)
       needsRender = true
     }
