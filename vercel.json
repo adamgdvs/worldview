@@ -9,6 +9,7 @@
     { "source": "/celestrak/(.*)", "destination": "/api/celestrak" },
     { "source": "/gpsjam/(.*)", "destination": "/api/gpsjam" },
     { "source": "/firms/(.*)", "destination": "/api/firms" },
-    { "source": "/adsbfi/(.*)", "destination": "/api/adsbfi" }
+    { "source": "/adsbfi/(.*)", "destination": "/api/adsbfi" },
+    { "source": "/windy/(.*)", "destination": "/api/windy" }
   ]
 }

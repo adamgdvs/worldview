@@ -74,16 +74,17 @@ export class CCTVProjectionSystem {
       if (this.activeFeeds.has(feed.id)) continue
 
       const billboard = this.collection.add({
-        position: Cartesian3.fromDegrees(feed.longitude, feed.latitude, 50),
+        position: Cartesian3.fromDegrees(feed.longitude, feed.latitude, 150),
         image: this.placeholderImage,
-        width: 80,
-        height: 60,
+        width: 64,
+        height: 64,
         id: { type: 'cctv', key: feed.id },
         horizontalOrigin: HorizontalOrigin.CENTER,
-        verticalOrigin: VerticalOrigin.BOTTOM,
-        scaleByDistance: new NearFarScalar(500, 1.0, 1e5, 0.2),
-        translucencyByDistance: new NearFarScalar(1e3, 1.0, 2e5, 0.0),
+        verticalOrigin: VerticalOrigin.CENTER,
+        scaleByDistance: new NearFarScalar(200, 1.2, 5e4, 0.3),
+        translucencyByDistance: new NearFarScalar(200, 1.0, 1e5, 0.0),
         color: Color.WHITE,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY, // always on top of 3D tiles
       })
 
       const active: ActiveFeed = { feed, billboard, objectUrl: null, intervalId: null }

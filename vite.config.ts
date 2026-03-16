@@ -53,6 +53,18 @@ export default defineConfig(() => {
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/gpsjam/, ''),
         },
+        // Windy Webcams API — inject API key server-side
+        '/windy': {
+          target: 'https://api.windy.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/windy/, ''),
+          configure: (proxy) => {
+            proxy.on('proxyReq', (proxyReq) => {
+              const key = process.env.VITE_WINDY_WEBCAMS_KEY ?? ''
+              if (key) proxyReq.setHeader('x-windy-api-key', key)
+            })
+          },
+        },
         // AISStream WebSocket is handled by vite-plugin-ais-proxy (manual upgrade)
       },
     },
