@@ -25,6 +25,8 @@ import { useEntities } from './hooks/useEntities'
 import { useKeyboard } from './hooks/useKeyboard'
 import { useStore } from './store'
 import { PostProcessManager } from './systems/PostProcessing'
+import { TrafficParticleSystem } from './systems/TrafficParticles'
+import { CCTVProjectionSystem } from './systems/CCTVProjection'
 
 Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN
 GoogleMaps.defaultApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY
@@ -273,14 +275,18 @@ function App() {
   const flightTrails = useRef<Map<string, Array<{ lon: number; lat: number; alt: number; t: number }>>>(new Map())
 
   const postProcessRef = useRef<PostProcessManager | null>(null)
+  const trafficSystemRef = useRef<TrafficParticleSystem | null>(null)
+  const cctvSystemRef = useRef<CCTVProjectionSystem | null>(null)
 
-  const { flights, militaryFlights, vessels, seismicEvents, wildfires, sats, airQuality, weather, gpsJam } = useEntities()
+  const { flights, militaryFlights, vessels, seismicEvents, wildfires, sats, airQuality, weather, gpsJam, roadSegments, cctvFeeds } = useEntities()
   const { selectedCity, activeLayers } = useStore()
   const activeMode = useStore((s) => s.activeMode)
   const shaderParams = useStore((s) => s.shaderParams)
   const trackedEntity = useStore((s) => s.trackedEntity)
   const showLabels = useStore((s) => s.showLabels)
   const aviationFilters = useStore((s) => s.aviationFilters)
+  const trafficDensity = useStore((s) => s.trafficDensity)
+  const trafficMaxParticles = useStore((s) => s.trafficMaxParticles)
 
   useKeyboard(viewerRef)
 
@@ -301,6 +307,8 @@ function App() {
   airQualityRef.current = airQuality
   const weatherRef = useRef(weather)
   weatherRef.current = weather
+  const cctvFeedsRef = useRef(cctvFeeds)
+  cctvFeedsRef.current = cctvFeeds
 
   // ── Viewer init ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -392,15 +400,29 @@ function App() {
     ppManager.setParams(useStore.getState().shaderParams)
     postProcessRef.current = ppManager
 
-    // ── Seismic pulse animation loop ──────────────────────────────────────────
-    let seismicAnimFrame: number | null = null
-    const animateSeismicPulses = () => {
+    // ── Traffic particle system ──────────────────────────────────────────
+    const trafficSys = new TrafficParticleSystem(viewer)
+    trafficSystemRef.current = trafficSys
+
+    // ── CCTV projection system ───────────────────────────────────────────
+    const cctvSys = new CCTVProjectionSystem(viewer)
+    cctvSystemRef.current = cctvSys
+
+    // ── Animation loop (seismic pulses + traffic particles) ─────────────────
+    let animFrame: number | null = null
+    let lastAnimTime = performance.now()
+    const animateLoop = () => {
+      const now = performance.now()
+      const dt = (now - lastAnimTime) / 1000 // seconds
+      lastAnimTime = now
+
+      // Seismic pulse animation
       const pulses = seismicPulseList.current
       if (pulses.length > 0) {
-        const now = Date.now()
+        const nowMs = Date.now()
         let needsRender = false
         for (const pulse of pulses) {
-          const elapsed = (now - pulse.startTime) % pulse.period
+          const elapsed = (nowMs - pulse.startTime) % pulse.period
           const t = elapsed / pulse.period  // 0 → 1
           const scale = pulse.baseScale * (1.0 + t * 2.5)  // expand 1× → 3.5×
           const alpha = 0.7 * (1.0 - t)  // fade from 0.7 → 0
@@ -410,9 +432,13 @@ function App() {
         }
         if (needsRender) viewer.scene.requestRender()
       }
-      seismicAnimFrame = requestAnimationFrame(animateSeismicPulses)
+
+      // Traffic particle system
+      trafficSys.update(dt)
+
+      animFrame = requestAnimationFrame(animateLoop)
     }
-    seismicAnimFrame = requestAnimationFrame(animateSeismicPulses)
+    animFrame = requestAnimationFrame(animateLoop)
 
     // ── Click-to-inspect: pick handler ───────────────────────────────────────
     const handler = new ScreenSpaceEventHandler(viewer.scene.canvas)
@@ -437,6 +463,8 @@ function App() {
           data = airQualityRef.current.find((s: any) => String(s.id) === key)
         } else if (type === 'weather') {
           data = weatherRef.current.find((w: any) => w.id === key)
+        } else if (type === 'cctv') {
+          data = cctvFeedsRef.current.find((f: any) => f.id === key)
         }
 
         if (data) {
@@ -448,8 +476,10 @@ function App() {
     }, ScreenSpaceEventType.LEFT_CLICK)
 
     return () => {
-      if (seismicAnimFrame != null) cancelAnimationFrame(seismicAnimFrame)
+      if (animFrame != null) cancelAnimationFrame(animFrame)
       ppManager.destroy()
+      trafficSys.destroy()
+      cctvSys.destroy()
       handler.destroy()
       viewer.destroy()
     }
@@ -473,6 +503,24 @@ function App() {
     }
     viewerRef.current?.scene.requestRender()
   }, [showLabels])
+
+  // ── Traffic system sync ────────────────────────────────────────────────────
+  useEffect(() => {
+    trafficSystemRef.current?.setRoadNetwork(roadSegments)
+  }, [roadSegments])
+
+  useEffect(() => {
+    trafficSystemRef.current?.setDensity(trafficDensity)
+  }, [trafficDensity])
+
+  useEffect(() => {
+    trafficSystemRef.current?.setMaxParticles(trafficMaxParticles)
+  }, [trafficMaxParticles])
+
+  // ── CCTV system sync ─────────────────────────────────────────────────────
+  useEffect(() => {
+    cctvSystemRef.current?.setFeeds(cctvFeeds)
+  }, [cctvFeeds])
 
   // ── Camera: fly to selected city (Nominatim smart centering) ────────────────
   // Fallback coords used when Nominatim is unavailable or for Global view

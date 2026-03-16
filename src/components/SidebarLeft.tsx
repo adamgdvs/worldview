@@ -1,5 +1,5 @@
 import { useStore, type AviationFilter } from '../store'
-import { Plane, Satellite, Activity, Ship, Flame, Wind, Radio, Map, Shield } from 'lucide-react'
+import { Plane, Satellite, Activity, Ship, Flame, Wind, Radio, Map, Shield, Car, Camera } from 'lucide-react'
 import { CollapsibleSection } from './ui/CollapsibleSection'
 import { SatelliteLookup } from './SatelliteLookup'
 
@@ -17,6 +17,8 @@ export function SidebarLeft() {
   const aviationFilters = useStore((s) => s.aviationFilters)
   const toggleAviationFilter = useStore((s) => s.toggleAviationFilter)
   const setAllAviationFilters = useStore((s) => s.setAllAviationFilters)
+  const trafficDensity = useStore((s) => s.trafficDensity)
+  const setTrafficDensity = useStore((s) => s.setTrafficDensity)
 
   if (cleanUI) return null
 
@@ -31,10 +33,16 @@ export function SidebarLeft() {
 
   return (
     <div className="absolute top-[50%] -translate-y-1/2 left-3 z-20 pointer-events-auto w-[200px] flex flex-col gap-2 max-h-[75vh]">
-      {/* CCTV MESH */}
-      <CollapsibleSection id="cctv-mesh" title="CCTV MESH" standalone>
-        <div className="px-3 py-3 text-center">
-          <span className="text-[8px] text-[#304c78] tracking-widest">COMING SOON</span>
+      {/* CCTV FEEDS */}
+      <CollapsibleSection id="cctv-mesh" title="CCTV FEEDS" standalone>
+        <div className="py-0.5">
+          <LayerRow
+            label="CCTV Cameras"
+            icon={<Camera size={12} />}
+            color="#00F0FF"
+            active={activeLayers.includes('cctv')}
+            onToggle={() => toggleLayer('cctv')}
+          />
         </div>
       </CollapsibleSection>
 
@@ -138,6 +146,29 @@ export function SidebarLeft() {
           </LayerSection>
 
           <LayerSection title="GROUND INTEL">
+            <LayerRow
+              label="Traffic Sim"
+              icon={<Car size={12} />}
+              color="#36D977"
+              active={activeLayers.includes('traffic')}
+              onToggle={() => toggleLayer('traffic')}
+            />
+            {activeLayers.includes('traffic') && (
+              <div className="px-3 py-1.5 border-t border-worldview-border/20">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[7px] text-[#4a6a8a] font-bold tracking-[1.5px] uppercase">DENSITY</span>
+                  <span className="text-[7px] text-[#5a7a9a] font-mono">{Math.round(trafficDensity * 100)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={Math.round(trafficDensity * 100)}
+                  onChange={(e) => setTrafficDensity(Number(e.target.value) / 100)}
+                  className="w-full h-1 bg-worldview-border/30 appearance-none cursor-pointer accent-[#36D977]"
+                />
+              </div>
+            )}
             <LayerRow
               label="Seismic"
               icon={<Activity size={12} />}

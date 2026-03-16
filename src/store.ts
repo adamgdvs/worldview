@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 
 interface SelectedEntity {
-  type: 'flight' | 'vessel' | 'seismic' | 'satellite' | 'wildfire'
+  type: 'flight' | 'vessel' | 'seismic' | 'satellite' | 'wildfire' | 'cctv'
   data: any
 }
 
@@ -35,6 +35,8 @@ interface WorldviewState {
   showLabels: boolean
   gpsModalOpen: boolean
   aviationFilters: Set<AviationFilter>
+  trafficDensity: number
+  trafficMaxParticles: number
   sectionCollapsed: Record<string, boolean>
   toggleLayer: (layerId: string) => void
   setMode: (mode: string) => void
@@ -48,6 +50,8 @@ interface WorldviewState {
   setGpsModalOpen: (open: boolean) => void
   toggleAviationFilter: (filter: AviationFilter) => void
   setAllAviationFilters: (on: boolean) => void
+  setTrafficDensity: (d: number) => void
+  setTrafficMaxParticles: (n: number) => void
   toggleSection: (id: string) => void
 }
 
@@ -64,7 +68,9 @@ export const useStore = create<WorldviewState>((set) => ({
   showLabels: true,
   gpsModalOpen: false,
   aviationFilters: new Set<AviationFilter>(['civil', 'military', 'helicopter', 'uav', 'unknown']),
-  sectionCollapsed: { 'cctv-mesh': true, 'scenes': true },
+  trafficDensity: 0.5,
+  trafficMaxParticles: 800,
+  sectionCollapsed: { 'scenes': true },
   toggleLayer: (layerId: string) => set((state) => ({
     activeLayers: state.activeLayers.includes(layerId)
       ? state.activeLayers.filter((id) => id !== layerId)
@@ -92,6 +98,8 @@ export const useStore = create<WorldviewState>((set) => ({
       ? new Set<AviationFilter>(['civil', 'military', 'helicopter', 'uav', 'unknown'])
       : new Set<AviationFilter>(),
   }),
+  setTrafficDensity: (d) => set({ trafficDensity: d }),
+  setTrafficMaxParticles: (n) => set({ trafficMaxParticles: n }),
   toggleSection: (id) => set((state) => ({
     sectionCollapsed: { ...state.sectionCollapsed, [id]: !state.sectionCollapsed[id] },
   })),

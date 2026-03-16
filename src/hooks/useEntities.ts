@@ -7,6 +7,8 @@ import { fetchSatellites, propagateAll, type SatelliteState } from '../adapters/
 import { fetchAirQuality, type AQStation } from '../adapters/airquality'
 import { fetchWeather, type WeatherPoint } from '../adapters/weather'
 import { fetchGpsJamData, type GpsJamCell } from '../adapters/gpsjam'
+import { fetchRoadNetwork, type RoadSegment } from '../adapters/traffic'
+import { getCCTVFeeds, type CCTVFeed } from '../adapters/cctv'
 import { useStore } from '../store'
 
 export function useEntities() {
@@ -19,7 +21,10 @@ export function useEntities() {
   const [airQuality, setAirQuality] = useState<AQStation[]>([])
   const [weather, setWeather] = useState<WeatherPoint[]>([])
   const [gpsJam, setGpsJam] = useState<GpsJamCell[]>([])
+  const [roadSegments, setRoadSegments] = useState<RoadSegment[]>([])
+  const [cctvFeeds, setCctvFeeds] = useState<CCTVFeed[]>([])
   const { activeLayers } = useStore()
+  const selectedCity = useStore((s) => s.selectedCity)
   const aisAdapterRef = useRef<AISAdapter | null>(null)
 
   // ── Data caches: persist across toggle cycles for instant restore ────────
@@ -42,6 +47,8 @@ export function useEntities() {
   const wantAirQ     = activeLayers.includes('airq')
   const wantWeather  = activeLayers.includes('weather')
   const wantGpsJam   = activeLayers.includes('gpsjam')
+  const wantTraffic  = activeLayers.includes('traffic')
+  const wantCctv     = activeLayers.includes('cctv')
 
   // ── Aviation (civil + military) ──────────────────────────────────────────
   useEffect(() => {
@@ -291,5 +298,30 @@ export function useEntities() {
     return () => clearInterval(interval)
   }, [wantGpsJam])
 
-  return { flights, militaryFlights, vessels, seismicEvents, wildfires, sats, airQuality, weather, gpsJam }
+  // ── Traffic (Overpass) — fetch road network per city ────────────────────
+  useEffect(() => {
+    if (!wantTraffic) {
+      setRoadSegments([])
+      return
+    }
+
+    let cancelled = false
+    ;(async () => {
+      const segments = await fetchRoadNetwork(selectedCity)
+      if (!cancelled) setRoadSegments(segments)
+    })()
+
+    return () => { cancelled = true }
+  }, [wantTraffic, selectedCity])
+
+  // ── CCTV feeds — static registry, filter by city ──────────────────────
+  useEffect(() => {
+    if (!wantCctv) {
+      setCctvFeeds([])
+      return
+    }
+    setCctvFeeds(getCCTVFeeds(selectedCity))
+  }, [wantCctv, selectedCity])
+
+  return { flights, militaryFlights, vessels, seismicEvents, wildfires, sats, airQuality, weather, gpsJam, roadSegments, cctvFeeds }
 }

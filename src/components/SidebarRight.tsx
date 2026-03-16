@@ -172,6 +172,7 @@ const TYPE_COLORS: Record<string, string> = {
   seismic: 'text-worldview-orange',
   satellite: 'text-[#D4A017]',
   wildfire: 'text-worldview-red',
+  cctv: 'text-worldview-cyan',
 }
 
 const TYPE_LABELS: Record<string, string> = {
@@ -180,6 +181,7 @@ const TYPE_LABELS: Record<string, string> = {
   seismic: 'SEISMIC EVENT',
   satellite: 'SATELLITE',
   wildfire: 'WILDFIRE',
+  cctv: 'CCTV FEED',
 }
 
 function InspectPanel({ entity, onClose }: { entity: { type: string; data: any }; onClose: () => void }) {
@@ -222,6 +224,7 @@ function InspectPanel({ entity, onClose }: { entity: { type: string; data: any }
         {type === 'seismic' && <SeismicDetail d={data} />}
         {type === 'satellite' && <SatelliteDetail d={data} />}
         {type === 'wildfire' && <WildfireDetail d={data} />}
+        {type === 'cctv' && <CCTVDetail d={data} />}
       </div>
 
       {/* Track button */}
@@ -320,6 +323,19 @@ function WildfireDetail({ d }: { d: any }) {
       <Row label="ACQ DATE" value={d.acq_date} />
       <Row label="LAT" value={d.latitude?.toFixed(4)} />
       <Row label="LON" value={d.longitude?.toFixed(4)} />
+    </>
+  )
+}
+
+function CCTVDetail({ d }: { d: any }) {
+  return (
+    <>
+      <Row label="NAME" value={d.name} />
+      <Row label="SOURCE" value={d.source} />
+      <Row label="CITY" value={d.city} />
+      <Row label="LAT" value={d.latitude?.toFixed(4)} />
+      <Row label="LON" value={d.longitude?.toFixed(4)} />
+      <Row label="REFRESH" value={d.refreshInterval ? `${d.refreshInterval / 1000}s` : undefined} />
     </>
   )
 }
