@@ -104,8 +104,8 @@ export class CCTVProjectionSystem {
     const url = await fetchCCTVSnapshot(active.feed)
     if (!url) return
 
-    // Revoke old URL to prevent memory leak
-    if (active.objectUrl) {
+    // Revoke old blob URL to prevent memory leak
+    if (active.objectUrl && active.objectUrl.startsWith('blob:')) {
       URL.revokeObjectURL(active.objectUrl)
     }
     active.objectUrl = url
@@ -114,30 +114,74 @@ export class CCTVProjectionSystem {
     const img = new Image()
     img.crossOrigin = 'anonymous'
     img.onload = () => {
-      const canvas = document.createElement('canvas')
-      canvas.width = 160; canvas.height = 120
-      const ctx = canvas.getContext('2d')!
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = 160; canvas.height = 120
+        const ctx = canvas.getContext('2d')!
 
-      // Draw camera feed
-      ctx.drawImage(img, 0, 0, 160, 120)
+        // Draw camera feed
+        ctx.drawImage(img, 0, 0, 160, 120)
 
-      // Border
-      ctx.strokeStyle = '#00f0ff'
-      ctx.lineWidth = 2
-      ctx.strokeRect(1, 1, 158, 118)
+        // Border
+        ctx.strokeStyle = '#00f0ff'
+        ctx.lineWidth = 2
+        ctx.strokeRect(1, 1, 158, 118)
 
-      // Label bar at bottom
-      ctx.fillStyle = 'rgba(10, 22, 40, 0.85)'
-      ctx.fillRect(0, 104, 160, 16)
-      ctx.font = 'bold 9px monospace'
-      ctx.fillStyle = '#00f0ff'
-      ctx.textAlign = 'center'
-      ctx.fillText(active.feed.name.substring(0, 20), 80, 115)
+        // Label bar at bottom
+        ctx.fillStyle = 'rgba(10, 22, 40, 0.85)'
+        ctx.fillRect(0, 104, 160, 16)
+        ctx.font = 'bold 9px monospace'
+        ctx.fillStyle = '#00f0ff'
+        ctx.textAlign = 'center'
+        ctx.fillText(active.feed.name.substring(0, 20), 80, 115)
 
-      active.billboard.image = canvas.toDataURL()
-      this.viewer.scene.requestRender()
+        active.billboard.image = canvas.toDataURL()
+        this.viewer.scene.requestRender()
+      } catch {
+        // Canvas tainted by CORS — use placeholder with label instead
+        this.applyLabelledPlaceholder(active)
+      }
+    }
+    img.onerror = () => {
+      // Image failed to load — use labelled placeholder
+      this.applyLabelledPlaceholder(active)
     }
     img.src = url
+  }
+
+  private applyLabelledPlaceholder(active: ActiveFeed) {
+    const size = 64
+    const canvas = document.createElement('canvas')
+    canvas.width = size; canvas.height = size
+    const ctx = canvas.getContext('2d')!
+
+    ctx.fillStyle = '#0a1628'
+    ctx.fillRect(0, 0, size, size)
+    ctx.strokeStyle = '#00f0ff'
+    ctx.lineWidth = 2
+    ctx.strokeRect(1, 1, size - 2, size - 2)
+
+    // Camera icon
+    ctx.fillStyle = '#00f0ff'
+    ctx.fillRect(18, 20, 28, 18)
+    ctx.beginPath()
+    ctx.moveTo(46, 24)
+    ctx.lineTo(54, 18)
+    ctx.lineTo(54, 42)
+    ctx.lineTo(46, 36)
+    ctx.fill()
+
+    // Name
+    ctx.font = 'bold 7px monospace'
+    ctx.fillStyle = '#00f0ff'
+    ctx.textAlign = 'center'
+    ctx.fillText(active.feed.name.substring(0, 12), size / 2, 52)
+    ctx.fillStyle = '#5a7a9a'
+    ctx.font = '6px monospace'
+    ctx.fillText('LIVE', size / 2, 60)
+
+    active.billboard.image = canvas.toDataURL()
+    this.viewer.scene.requestRender()
   }
 
   getFeedById(id: string): CCTVFeed | undefined {

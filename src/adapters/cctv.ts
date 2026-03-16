@@ -9,31 +9,128 @@ export interface CCTVFeed {
   city: string
 }
 
-// Curated static registry of known-good public CCTV feeds
-// TfL JamCams are CORS-friendly and reliable
-const FEED_REGISTRY: CCTVFeed[] = [
-  // London — TfL JamCams
-  { id: 'tfl-01', name: 'Trafalgar Square',    latitude: 51.5080, longitude: -0.1281, imageUrl: 'https://s3-eu-west-1.amazonaws.com/jamcams.tfl.gov.uk/00001.06807.jpg', refreshInterval: 60_000, source: 'TfL JamCam', city: 'London' },
-  { id: 'tfl-02', name: 'Park Lane',           latitude: 51.5069, longitude: -0.1537, imageUrl: 'https://s3-eu-west-1.amazonaws.com/jamcams.tfl.gov.uk/00001.06811.jpg', refreshInterval: 60_000, source: 'TfL JamCam', city: 'London' },
-  { id: 'tfl-03', name: 'Tower Bridge',        latitude: 51.5055, longitude: -0.0754, imageUrl: 'https://s3-eu-west-1.amazonaws.com/jamcams.tfl.gov.uk/00001.01251.jpg', refreshInterval: 60_000, source: 'TfL JamCam', city: 'London' },
-  { id: 'tfl-04', name: 'Westminster Bridge',  latitude: 51.5008, longitude: -0.1215, imageUrl: 'https://s3-eu-west-1.amazonaws.com/jamcams.tfl.gov.uk/00001.06831.jpg', refreshInterval: 60_000, source: 'TfL JamCam', city: 'London' },
-  { id: 'tfl-05', name: 'Elephant & Castle',   latitude: 51.4945, longitude: -0.1006, imageUrl: 'https://s3-eu-west-1.amazonaws.com/jamcams.tfl.gov.uk/00001.04619.jpg', refreshInterval: 60_000, source: 'TfL JamCam', city: 'London' },
-  { id: 'tfl-06', name: 'Vauxhall Bridge',     latitude: 51.4873, longitude: -0.1271, imageUrl: 'https://s3-eu-west-1.amazonaws.com/jamcams.tfl.gov.uk/00001.06805.jpg', refreshInterval: 60_000, source: 'TfL JamCam', city: 'London' },
-  { id: 'tfl-07', name: 'Marylebone Road',     latitude: 51.5225, longitude: -0.1556, imageUrl: 'https://s3-eu-west-1.amazonaws.com/jamcams.tfl.gov.uk/00001.06825.jpg', refreshInterval: 60_000, source: 'TfL JamCam', city: 'London' },
-  { id: 'tfl-08', name: 'Euston Road',         latitude: 51.5267, longitude: -0.1294, imageUrl: 'https://s3-eu-west-1.amazonaws.com/jamcams.tfl.gov.uk/00001.06814.jpg', refreshInterval: 60_000, source: 'TfL JamCam', city: 'London' },
+// City center coordinates for nearby searches (matches App.tsx CITY_FALLBACKS)
+const CITY_COORDS: Record<string, { lat: number; lon: number }> = {
+  'Austin':        { lat: 30.2672, lon: -97.7431 },
+  'New York':      { lat: 40.7128, lon: -74.0060 },
+  'Tokyo':         { lat: 35.6762, lon: 139.6503 },
+  'London':        { lat: 51.5074, lon: -0.1278 },
+  'Paris':         { lat: 48.8566, lon: 2.3522 },
+  'Dubai':         { lat: 25.2048, lon: 55.2708 },
+  'Washington DC': { lat: 38.9072, lon: -77.0369 },
+  'San Francisco': { lat: 37.7749, lon: -122.4194 },
+  'Hong Kong':     { lat: 22.3193, lon: 114.1694 },
+  'Singapore':     { lat: 1.3521, lon: 103.8198 },
+}
 
-  // Washington DC — public DOT cams (image endpoints)
-  { id: 'dc-01', name: '14th St & Constitution', latitude: 38.8913, longitude: -77.0328, imageUrl: 'https://opendata.dc.gov/datasets/traffic-camera/api', refreshInterval: 120_000, source: 'DC DOT', city: 'Washington DC' },
-  { id: 'dc-02', name: 'Capitol Hill',           latitude: 38.8899, longitude: -77.0091, imageUrl: 'https://opendata.dc.gov/datasets/traffic-camera/api', refreshInterval: 120_000, source: 'DC DOT', city: 'Washington DC' },
+// In-memory cache: city → feeds (avoid re-fetching on toggle)
+const feedCache = new Map<string, { feeds: CCTVFeed[]; timestamp: number }>()
+const CACHE_TTL = 8 * 60_000 // 8 min (token expiry is 10 min on free tier)
 
-  // New York — NYC DOT (placeholder URLs — actual feeds need proxy)
-  { id: 'nyc-01', name: 'Times Square',    latitude: 40.7580, longitude: -73.9855, imageUrl: 'https://webcams.nyctmc.org/api/cameras/brooklyn-bridge', refreshInterval: 120_000, source: 'NYC DOT', city: 'New York' },
-  { id: 'nyc-02', name: 'Brooklyn Bridge', latitude: 40.7061, longitude: -73.9969, imageUrl: 'https://webcams.nyctmc.org/api/cameras/times-square',    refreshInterval: 120_000, source: 'NYC DOT', city: 'New York' },
-]
+interface WindyWebcam {
+  webcamId: number
+  title: string
+  status: string
+  images?: {
+    current?: {
+      icon?: string
+      preview?: string
+      thumbnail?: string
+    }
+  }
+  location?: {
+    city?: string
+    country?: string
+    latitude?: number
+    longitude?: number
+  }
+}
 
-export function getCCTVFeeds(city?: string): CCTVFeed[] {
-  if (!city || city === 'Global') return FEED_REGISTRY
-  return FEED_REGISTRY.filter(f => f.city === city)
+/**
+ * Fetch nearby webcams from Windy Webcams API v3.
+ * Uses /windy proxy in dev (vite.config.ts) to inject the API key header.
+ * In prod, we'd use a serverless function or edge proxy.
+ */
+async function fetchWindyWebcams(lat: number, lon: number, radiusKm = 25, limit = 15): Promise<CCTVFeed[]> {
+  const apiKey = import.meta.env.VITE_WINDY_WEBCAMS_KEY
+  if (!apiKey || apiKey.includes('your_')) {
+    console.warn('[CCTV] No Windy Webcams API key (VITE_WINDY_WEBCAMS_KEY)')
+    return []
+  }
+
+  try {
+    const url = `https://api.windy.com/webcams/api/v3/webcams` +
+      `?nearby=${lat},${lon},${radiusKm}` +
+      `&limit=${limit}` +
+      `&include=images,location` +
+      `&lang=en`
+
+    const res = await fetch(url, {
+      headers: { 'x-windy-api-key': apiKey },
+    })
+
+    if (!res.ok) {
+      console.warn(`[CCTV] Windy API returned ${res.status}`)
+      return []
+    }
+
+    const data = await res.json()
+    const webcams: WindyWebcam[] = data?.webcams ?? []
+
+    return webcams
+      .filter(w => w.status === 'active' && w.images?.current && w.location?.latitude != null)
+      .map(w => ({
+        id: `windy-${w.webcamId}`,
+        name: w.title || `Webcam ${w.webcamId}`,
+        latitude: w.location!.latitude!,
+        longitude: w.location!.longitude!,
+        // Prefer preview > thumbnail > icon (ascending quality on free tier)
+        imageUrl: w.images!.current!.preview ?? w.images!.current!.thumbnail ?? w.images!.current!.icon ?? '',
+        refreshInterval: 5 * 60_000, // 5 min (free tier tokens expire at 10 min)
+        source: `Windy · ${w.location?.city ?? w.location?.country ?? 'Unknown'}`,
+        city: w.location?.city ?? '',
+      }))
+      .filter(f => f.imageUrl.length > 0)
+  } catch (err) {
+    console.error('[CCTV] Windy fetch failed:', err)
+    return []
+  }
+}
+
+/**
+ * Get CCTV feeds for a city.
+ * - Named city → nearby search around city center
+ * - "Global" → returns feeds for all cities (cached)
+ */
+export async function getCCTVFeeds(city?: string): Promise<CCTVFeed[]> {
+  if (!city || city === 'Global') {
+    // For global view, fetch a sample from a few major cities
+    const majorCities = ['New York', 'London', 'Tokyo', 'Paris', 'Dubai']
+    const all: CCTVFeed[] = []
+    for (const c of majorCities) {
+      const feeds = await getCCTVFeedsForCity(c)
+      all.push(...feeds)
+    }
+    return all
+  }
+  return getCCTVFeedsForCity(city)
+}
+
+async function getCCTVFeedsForCity(city: string): Promise<CCTVFeed[]> {
+  // Check cache
+  const cached = feedCache.get(city)
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.feeds
+  }
+
+  const coords = CITY_COORDS[city]
+  if (!coords) return []
+
+  const feeds = await fetchWindyWebcams(coords.lat, coords.lon, 20, 15)
+  feedCache.set(city, { feeds, timestamp: Date.now() })
+
+  console.info(`[CCTV] ${feeds.length} webcams near ${city}`)
+  return feeds
 }
 
 export async function fetchCCTVSnapshot(feed: CCTVFeed): Promise<string | null> {
@@ -43,6 +140,7 @@ export async function fetchCCTVSnapshot(feed: CCTVFeed): Promise<string | null> 
     const blob = await res.blob()
     return URL.createObjectURL(blob)
   } catch {
-    return null
+    // Windy images may not be CORS-accessible directly; use as <img> src instead
+    return feed.imageUrl
   }
 }

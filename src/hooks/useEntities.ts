@@ -314,13 +314,26 @@ export function useEntities() {
     return () => { cancelled = true }
   }, [wantTraffic, selectedCity])
 
-  // ── CCTV feeds — static registry, filter by city ──────────────────────
+  // ── CCTV feeds — Windy Webcams API, nearby search per city ─────────────
   useEffect(() => {
     if (!wantCctv) {
       setCctvFeeds([])
       return
     }
-    setCctvFeeds(getCCTVFeeds(selectedCity))
+
+    let cancelled = false
+    ;(async () => {
+      const feeds = await getCCTVFeeds(selectedCity)
+      if (!cancelled) setCctvFeeds(feeds)
+    })()
+
+    // Re-fetch every 8 minutes (Windy free tier tokens expire at 10 min)
+    const interval = setInterval(async () => {
+      const feeds = await getCCTVFeeds(selectedCity)
+      if (!cancelled) setCctvFeeds(feeds)
+    }, 8 * 60_000)
+
+    return () => { cancelled = true; clearInterval(interval) }
   }, [wantCctv, selectedCity])
 
   return { flights, militaryFlights, vessels, seismicEvents, wildfires, sats, airQuality, weather, gpsJam, roadSegments, cctvFeeds }
