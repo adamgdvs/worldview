@@ -116,12 +116,14 @@ async function fetchWindyWebcams(lat: number, lon: number, radiusKm = 25, limit 
  */
 export async function getCCTVFeeds(city?: string): Promise<CCTVFeed[]> {
   if (!city || city === 'Global') {
+    // Fetch all cities in parallel, don't let one failure block all
     const majorCities = ['New York', 'London', 'Tokyo', 'Paris']
+    const results = await Promise.allSettled(majorCities.map(c => getCCTVFeedsForCity(c)))
     const all: CCTVFeed[] = []
-    for (const c of majorCities) {
-      const feeds = await getCCTVFeedsForCity(c)
-      all.push(...feeds)
+    for (const r of results) {
+      if (r.status === 'fulfilled') all.push(...r.value)
     }
+    console.info(`[CCTV] Global total: ${all.length} feeds from ${results.filter(r => r.status === 'fulfilled').length}/${majorCities.length} cities`)
     return all
   }
   return getCCTVFeedsForCity(city)

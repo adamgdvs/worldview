@@ -323,8 +323,13 @@ export function useEntities() {
 
     let cancelled = false
     ;(async () => {
+      console.info(`[CCTV useEntities] Fetching feeds for "${selectedCity}"...`)
       const feeds = await getCCTVFeeds(selectedCity)
-      if (!cancelled) setCctvFeeds(feeds)
+      console.info(`[CCTV useEntities] Got ${feeds.length} feeds, cancelled=${cancelled}`)
+      if (!cancelled) {
+        console.info(`[CCTV useEntities] Setting state with ${feeds.length} feeds`)
+        setCctvFeeds(feeds)
+      }
     })()
 
     // Re-fetch every 8 minutes (Windy free tier tokens expire at 10 min)
