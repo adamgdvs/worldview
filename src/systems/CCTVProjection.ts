@@ -59,6 +59,7 @@ export class CCTVProjectionSystem {
   }
 
   setFeeds(feeds: CCTVFeed[]) {
+    console.info(`[CCTVProjection] setFeeds called with ${feeds.length} feeds, existing=${this.activeFeeds.size}`)
     const incoming = new Set(feeds.map(f => f.id))
 
     // Remove feeds no longer in set
@@ -81,8 +82,8 @@ export class CCTVProjectionSystem {
         id: { type: 'cctv', key: feed.id },
         horizontalOrigin: HorizontalOrigin.CENTER,
         verticalOrigin: VerticalOrigin.CENTER,
-        scaleByDistance: new NearFarScalar(200, 1.2, 5e4, 0.3),
-        translucencyByDistance: new NearFarScalar(200, 1.0, 1e5, 0.0),
+        scaleByDistance: new NearFarScalar(500, 1.2, 5e6, 0.4),
+        translucencyByDistance: new NearFarScalar(1e3, 1.0, 1e7, 0.3),
         color: Color.WHITE,
         disableDepthTestDistance: Number.POSITIVE_INFINITY, // always on top of 3D tiles
       })

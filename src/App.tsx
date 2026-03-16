@@ -506,6 +506,7 @@ function App() {
 
   // ── Traffic system sync ────────────────────────────────────────────────────
   useEffect(() => {
+    console.info(`[Traffic Sync] roadSegments=${roadSegments.length}, system=${!!trafficSystemRef.current}`)
     trafficSystemRef.current?.setRoadNetwork(roadSegments)
   }, [roadSegments])
 
@@ -519,7 +520,12 @@ function App() {
 
   // ── CCTV system sync ─────────────────────────────────────────────────────
   useEffect(() => {
-    cctvSystemRef.current?.setFeeds(cctvFeeds)
+    console.info(`[CCTV Sync] cctvFeeds=${cctvFeeds.length}, system=${!!cctvSystemRef.current}`)
+    if (cctvSystemRef.current && cctvFeeds.length > 0) {
+      cctvSystemRef.current.setFeeds(cctvFeeds)
+    } else if (cctvSystemRef.current && cctvFeeds.length === 0) {
+      cctvSystemRef.current.setFeeds([])
+    }
   }, [cctvFeeds])
 
   // ── Camera: fly to selected city (Nominatim smart centering) ────────────────
