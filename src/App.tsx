@@ -451,6 +451,7 @@ function App() {
     const initTrafficTiles = async () => {
       try {
         const sess = await createTrafficSession()
+        if (viewer.isDestroyed()) return
         console.info('[Traffic] Session created, token:', sess.session.slice(0, 20) + '...', 'expiry:', new Date(sess.expiry).toISOString())
 
         const tileUrl = getTrafficTileUrl(sess.session)

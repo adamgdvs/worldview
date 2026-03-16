@@ -314,12 +314,15 @@ export function useEntities() {
     }
 
     let cancelled = false
-    ;(async () => {
-      const segments = await fetchRoadNetworkByBbox(cameraBbox, `viewport`)
-      if (!cancelled) setRoadSegments(segments)
-    })()
+    // Debounce: wait 800ms after camera stops before fetching
+    const timer = setTimeout(() => {
+      ;(async () => {
+        const segments = await fetchRoadNetworkByBbox(cameraBbox, `viewport`)
+        if (!cancelled) setRoadSegments(segments)
+      })()
+    }, 800)
 
-    return () => { cancelled = true }
+    return () => { cancelled = true; clearTimeout(timer) }
     // Stringify bbox to avoid re-renders from array identity changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wantTraffic, cameraBbox?.[0], cameraBbox?.[1], cameraBbox?.[2], cameraBbox?.[3], cameraHeight > 50_000])

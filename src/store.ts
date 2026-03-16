@@ -63,7 +63,7 @@ interface WorldviewState {
 }
 
 export const useStore = create<WorldviewState>((set) => ({
-  activeLayers: ['avi-civil', 'maritime', 'satellites', 'seismic', 'fires'],
+  activeLayers: [],
   activeMode: 'CRT',
   selectedCity: 'Global',
   alertCount: 7,

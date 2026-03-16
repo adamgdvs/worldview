@@ -116,7 +116,7 @@ export class CCTVProjectionSystem {
     if (feeds.length > 0) {
       console.info(`[CCTVProjection] ${this.activeFeeds.size} camera icons on globe`)
     }
-    this.viewer.scene.requestRender()
+    if (!this.viewer.isDestroyed()) this.viewer.scene.requestRender()
   }
 
   getFeedById(id: string): CCTVFeed | undefined {

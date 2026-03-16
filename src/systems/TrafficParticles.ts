@@ -1,6 +1,7 @@
 // @ts-ignore
 import {
-  PointPrimitiveCollection, Cartesian3, Color, NearFarScalar,
+  BillboardCollection, Cartesian3, Color, NearFarScalar,
+  HorizontalOrigin, VerticalOrigin,
 } from 'cesium'
 import type { RoadSegment } from '../adapters/traffic'
 import type { TrafficDataSampler } from '../adapters/trafficTiles'
@@ -9,6 +10,8 @@ interface SegmentMeta {
   segment: RoadSegment
   pairs: Array<{ lon1: number; lat1: number; lon2: number; lat2: number; dist: number }>
   totalLength: number
+  endIntersection: boolean
+  startIntersection: boolean
 }
 
 interface Particle {
@@ -16,19 +19,29 @@ interface Particle {
   pairIdx: number
   t: number       // 0→1 along current pair
   speed: number   // degrees per second (approx)
-  primitive: any  // CesiumJS point primitive ref
+  baseSpeed: number
+  billboard: any  // CesiumJS billboard ref
+  stopped: number // time remaining stopped (seconds), 0 = moving
 }
 
+// Traffic light cycle
+const GREEN_DURATION = 8
+const RED_DURATION = 6
+const CYCLE_DURATION = GREEN_DURATION + RED_DURATION
+const BRAKE_ZONE = 0.7
+
+// Faster speeds for smoother visible movement
 const SPEED_BY_CLASS: Record<string, number> = {
-  motorway:  0.0008,
-  trunk:     0.0006,
-  primary:   0.0004,
-  secondary: 0.0003,
+  motorway:  0.0012,
+  trunk:     0.0009,
+  primary:   0.0006,
+  secondary: 0.0004,
 }
 
-const COL_GREEN  = Color.fromCssColorString('#36D977')
-const COL_YELLOW = Color.fromCssColorString('#FFD700')
-const COL_RED    = Color.fromCssColorString('#FF4444')
+// Semi-transparent speed colors
+const COL_GREEN  = new Color(0.21, 0.85, 0.47, 0.7)  // #36D977 @ 70%
+const COL_YELLOW = new Color(1.0, 0.84, 0.0, 0.7)    // #FFD700 @ 70%
+const COL_RED    = new Color(1.0, 0.27, 0.27, 0.7)    // #FF4444 @ 70%
 
 function speedColor(normalizedSpeed: number): Color {
   if (normalizedSpeed > 0.65) return COL_GREEN
@@ -36,8 +49,18 @@ function speedColor(normalizedSpeed: number): Color {
   return COL_RED
 }
 
+/** Create a small square image data URL for vehicle billboards */
+function createSquareIcon(size = 6): string {
+  const canvas = document.createElement('canvas')
+  canvas.width = size; canvas.height = size
+  const ctx = canvas.getContext('2d')!
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, size, size)
+  return canvas.toDataURL()
+}
+
 export class TrafficParticleSystem {
-  private collection: PointPrimitiveCollection
+  private collection: BillboardCollection
   private viewer: any
   private segments: SegmentMeta[] = []
   private particles: Particle[] = []
@@ -46,27 +69,30 @@ export class TrafficParticleSystem {
   private totalNetworkLength = 0
   private sampler: TrafficDataSampler | null = null
   private frameCount = 0
+  private squareIcon: string
 
   // Endpoint index for segment connectivity
   private endpointIndex: Map<string, number[]> = new Map()
+  // Intersection phase offsets
+  private intersectionPhase: Map<string, number> = new Map()
 
   constructor(viewer: any) {
     this.viewer = viewer
-    this.collection = new PointPrimitiveCollection()
+    this.collection = new BillboardCollection()
     viewer.scene.primitives.add(this.collection)
+    this.squareIcon = createSquareIcon(6)
   }
 
   setRoadNetwork(rawSegments: RoadSegment[]) {
-    // Clear existing
     this.collection.removeAll()
     this.particles = []
     this.segments = []
     this.endpointIndex.clear()
+    this.intersectionPhase.clear()
     this.totalNetworkLength = 0
 
     if (!rawSegments.length) return
 
-    // Pre-compute segment metadata
     for (let i = 0; i < rawSegments.length; i++) {
       const seg = rawSegments[i]
       const pairs: SegmentMeta['pairs'] = []
@@ -81,10 +107,9 @@ export class TrafficParticleSystem {
         total += dist
       }
       if (pairs.length === 0) continue
-      this.segments.push({ segment: seg, pairs, totalLength: total })
+      this.segments.push({ segment: seg, pairs, totalLength: total, endIntersection: false, startIntersection: false })
       this.totalNetworkLength += total
 
-      // Index endpoints for connectivity
       const sIdx = this.segments.length - 1
       const firstCoord = seg.coordinates[0]
       const lastCoord = seg.coordinates[seg.coordinates.length - 1]
@@ -95,6 +120,41 @@ export class TrafficParticleSystem {
       this.endpointIndex.get(startKey)!.push(sIdx)
       if (!this.endpointIndex.has(endKey)) this.endpointIndex.set(endKey, [])
       this.endpointIndex.get(endKey)!.push(sIdx)
+    }
+
+    // Identify intersections (3+ segments meet)
+    for (const [key, segIndices] of this.endpointIndex) {
+      if (segIndices.length >= 3) {
+        this.intersectionPhase.set(key, Math.random() * CYCLE_DURATION)
+        for (const sIdx of segIndices) {
+          const seg = this.segments[sIdx]
+          const firstCoord = seg.segment.coordinates[0]
+          const lastCoord = seg.segment.coordinates[seg.segment.coordinates.length - 1]
+          const sk = `${firstCoord[0].toFixed(4)},${firstCoord[1].toFixed(4)}`
+          const ek = `${lastCoord[0].toFixed(4)},${lastCoord[1].toFixed(4)}`
+          if (ek === key) seg.endIntersection = true
+          if (sk === key) seg.startIntersection = true
+        }
+      }
+    }
+
+    // 2-way junctions on minor roads = stop signs
+    for (const [key, segIndices] of this.endpointIndex) {
+      if (segIndices.length === 2 && !this.intersectionPhase.has(key)) {
+        const hasMinor = segIndices.some(i => {
+          const rc = this.segments[i].segment.roadClass
+          return rc === 'secondary' || rc === 'primary'
+        })
+        if (hasMinor) {
+          this.intersectionPhase.set(key, Math.random() * CYCLE_DURATION)
+          for (const sIdx of segIndices) {
+            const seg = this.segments[sIdx]
+            const lastCoord = seg.segment.coordinates[seg.segment.coordinates.length - 1]
+            const ek = `${lastCoord[0].toFixed(4)},${lastCoord[1].toFixed(4)}`
+            if (ek === key) seg.endIntersection = true
+          }
+        }
+      }
     }
 
     this.spawnParticles()
@@ -126,7 +186,6 @@ export class TrafficParticleSystem {
     const count = Math.round(this.maxParticles * this.density)
 
     for (let i = 0; i < count; i++) {
-      // Weighted random segment selection by length
       let r = Math.random() * this.totalNetworkLength
       let segIdx = 0
       for (let j = 0; j < this.segments.length; j++) {
@@ -137,24 +196,39 @@ export class TrafficParticleSystem {
       const meta = this.segments[segIdx]
       const pairIdx = Math.floor(Math.random() * meta.pairs.length)
       const t = Math.random()
-      const baseSpeed = SPEED_BY_CLASS[meta.segment.roadClass] ?? 0.0003
-      // Add some randomness (±30%)
+      const baseSpeed = SPEED_BY_CLASS[meta.segment.roadClass] ?? 0.0004
       const speed = baseSpeed * (0.7 + Math.random() * 0.6)
 
       const pair = meta.pairs[pairIdx]
       const lon = pair.lon1 + (pair.lon2 - pair.lon1) * t
       const lat = pair.lat1 + (pair.lat2 - pair.lat1) * t
 
-      const primitive = this.collection.add({
+      const billboard = this.collection.add({
         position: Cartesian3.fromDegrees(lon, lat, 5),
-        pixelSize: 3,
-        color: speedColor(speed / 0.0008),
-        scaleByDistance: new NearFarScalar(500, 1.5, 5e5, 0.3),
-        translucencyByDistance: new NearFarScalar(1e3, 1.0, 3e5, 0.0),
+        image: this.squareIcon,
+        width: 5,
+        height: 5,
+        color: speedColor(speed / 0.0012),
+        horizontalOrigin: HorizontalOrigin.CENTER,
+        verticalOrigin: VerticalOrigin.CENTER,
+        scaleByDistance: new NearFarScalar(500, 1.8, 5e5, 0.4),
+        translucencyByDistance: new NearFarScalar(500, 1.0, 3e5, 0.0),
       })
 
-      this.particles.push({ segIdx, pairIdx, t, speed, primitive })
+      this.particles.push({ segIdx, pairIdx, t, speed, baseSpeed: speed, billboard, stopped: 0 })
     }
+  }
+
+  private isRedLight(intersectionKey: string, now: number): boolean {
+    const phase = this.intersectionPhase.get(intersectionKey)
+    if (phase == null) return false
+    const cycleTime = (now + phase) % CYCLE_DURATION
+    return cycleTime >= GREEN_DURATION
+  }
+
+  private getEndKey(meta: SegmentMeta): string {
+    const lastCoord = meta.segment.coordinates[meta.segment.coordinates.length - 1]
+    return `${lastCoord[0].toFixed(4)},${lastCoord[1].toFixed(4)}`
   }
 
   update(dt: number) {
@@ -162,42 +236,82 @@ export class TrafficParticleSystem {
     let needsRender = false
     this.frameCount++
 
-    // Re-sample traffic levels every ~30 frames (~0.5s at 60fps)
+    const now = performance.now() / 1000
+
     const shouldSample = this.sampler && (this.frameCount % 30 === 0)
 
     for (const p of this.particles) {
       const meta = this.segments[p.segIdx]
       if (!meta) continue
 
+      // Handle stopped particles
+      if (p.stopped > 0) {
+        p.stopped -= dt
+        if (p.stopped > 0) {
+          p.billboard.color = COL_RED
+          continue
+        }
+        p.stopped = 0
+        p.speed = p.baseSpeed
+      }
+
       const pair = meta.pairs[p.pairIdx]
       if (!pair || pair.dist < 1e-8) {
-        // Skip degenerate segments
         p.pairIdx = (p.pairIdx + 1) % meta.pairs.length
         p.t = 0
         continue
       }
 
-      // Advance position
+      // Braking at intersections
+      const isLastPair = p.pairIdx === meta.pairs.length - 1
+      if (isLastPair && meta.endIntersection && p.t > BRAKE_ZONE) {
+        const endKey = this.getEndKey(meta)
+        if (this.isRedLight(endKey, now)) {
+          const brakeFactor = 1.0 - ((p.t - BRAKE_ZONE) / (1.0 - BRAKE_ZONE))
+          p.speed = p.baseSpeed * Math.max(0.05, brakeFactor)
+          if (p.t > 0.95) {
+            p.speed = 0
+            p.stopped = 0.1
+            p.billboard.color = COL_RED
+            continue
+          }
+        } else {
+          p.speed = p.baseSpeed
+        }
+      }
+
+      // Advance
       p.t += (p.speed * dt) / pair.dist
 
       if (p.t >= 1) {
-        // Move to next pair in segment
         p.pairIdx++
         p.t = 0
 
         if (p.pairIdx >= meta.pairs.length) {
-          // Segment end — try to find connected segment
+          if (meta.endIntersection) {
+            const endKey = this.getEndKey(meta)
+            if (this.isRedLight(endKey, now)) {
+              const phase = this.intersectionPhase.get(endKey) ?? 0
+              const cycleTime = (now + phase) % CYCLE_DURATION
+              const remaining = CYCLE_DURATION - cycleTime
+              p.stopped = remaining + Math.random() * 0.5
+              p.pairIdx = meta.pairs.length - 1
+              p.t = 0.98
+              p.billboard.color = COL_RED
+              continue
+            }
+          }
+
+          // Try connected segment
           const lastCoord = meta.segment.coordinates[meta.segment.coordinates.length - 1]
           const endKey = `${lastCoord[0].toFixed(4)},${lastCoord[1].toFixed(4)}`
           const connected = this.endpointIndex.get(endKey)
 
           if (connected && connected.length > 1) {
-            // Pick a random connected segment (not the current one)
             const candidates = connected.filter(idx => idx !== p.segIdx)
             if (candidates.length > 0) {
               const nextIdx = candidates[Math.floor(Math.random() * candidates.length)]
               const nextMeta = this.segments[nextIdx]
-              // Check if we should start from beginning or end of the new segment
               const nextFirst = nextMeta.segment.coordinates[0]
               const startKey = `${nextFirst[0].toFixed(4)},${nextFirst[1].toFixed(4)}`
               p.segIdx = nextIdx
@@ -207,6 +321,9 @@ export class TrafficParticleSystem {
                 p.pairIdx = nextMeta.pairs.length - 1
               }
               p.t = 0
+              const newBaseSpeed = SPEED_BY_CLASS[nextMeta.segment.roadClass] ?? 0.0004
+              p.baseSpeed = newBaseSpeed * (0.7 + Math.random() * 0.6)
+              p.speed = p.baseSpeed
             } else {
               this.respawnParticle(p)
             }
@@ -217,30 +334,32 @@ export class TrafficParticleSystem {
         }
       }
 
-      // Interpolate position after advance
+      // Interpolate position
       const cp = meta.pairs[p.pairIdx]
       if (!cp) continue
       const lon = cp.lon1 + (cp.lon2 - cp.lon1) * p.t
       const lat = cp.lat1 + (cp.lat2 - cp.lat1) * p.t
 
-      // Sample real traffic data to update speed + color
-      if (shouldSample) {
+      // Sample real traffic data
+      if (shouldSample && p.stopped <= 0) {
         const level = this.sampler!.sampleTrafficLevel(lat, lon)
         if (level !== null) {
-          p.speed = 0.0001 + level * 0.0007
-          p.primitive.color = speedColor(level)
+          p.baseSpeed = 0.0002 + level * 0.001
+          p.speed = p.baseSpeed
+          p.billboard.color = speedColor(level)
         }
+      } else if (p.stopped <= 0) {
+        p.billboard.color = speedColor(p.speed / 0.0012)
       }
 
-      p.primitive.position = Cartesian3.fromDegrees(lon, lat, 5)
+      p.billboard.position = Cartesian3.fromDegrees(lon, lat, 5)
       needsRender = true
     }
 
-    if (needsRender) this.viewer.scene.requestRender()
+    if (needsRender && !this.viewer.isDestroyed()) this.viewer.scene.requestRender()
   }
 
   private respawnParticle(p: Particle) {
-    // Random respawn on network
     let r = Math.random() * this.totalNetworkLength
     for (let j = 0; j < this.segments.length; j++) {
       r -= this.segments[j].totalLength
@@ -248,10 +367,17 @@ export class TrafficParticleSystem {
     }
     p.pairIdx = Math.floor(Math.random() * this.segments[p.segIdx].pairs.length)
     p.t = 0
+    p.stopped = 0
+    const meta = this.segments[p.segIdx]
+    const newBaseSpeed = SPEED_BY_CLASS[meta.segment.roadClass] ?? 0.0004
+    p.baseSpeed = newBaseSpeed * (0.7 + Math.random() * 0.6)
+    p.speed = p.baseSpeed
   }
 
   destroy() {
-    this.viewer.scene.primitives.remove(this.collection)
+    if (!this.viewer.isDestroyed()) {
+      this.viewer.scene.primitives.remove(this.collection)
+    }
     this.particles = []
     this.segments = []
   }

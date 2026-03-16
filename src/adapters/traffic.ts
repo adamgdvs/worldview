@@ -14,6 +14,12 @@ interface CacheEntry {
 }
 
 const CACHE_TTL = 24 * 60 * 60_000 // 24 hours
+const MIN_FETCH_INTERVAL = 15_000  // minimum 15s between Overpass requests
+const MAX_RETRIES = 2
+const RETRY_DELAY = 5_000 // 5s between retries
+
+let lastFetchTime = 0
+let lastFetchedSegments: RoadSegment[] = []  // keep last successful result as fallback
 
 // Bounding boxes per city (south, west, north, east)
 const CITY_BBOX: Record<string, [number, number, number, number]> = {
@@ -86,37 +92,67 @@ export async function fetchRoadNetworkByBbox(
     const cached = await get<CacheEntry>(cacheKey)
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
       console.info(`[Traffic] Cache hit for ${label ?? 'bbox'} (${cached.segments.length} segments)`)
+      lastFetchedSegments = cached.segments
       return cached.segments
     }
   } catch { /* cache miss */ }
 
+  // Throttle: don't hammer Overpass — return last result if too soon
+  const now = Date.now()
+  if (now - lastFetchTime < MIN_FETCH_INTERVAL) {
+    console.info(`[Traffic] Throttled — returning ${lastFetchedSegments.length} cached segments`)
+    return lastFetchedSegments
+  }
+
   const query = buildOverpassQuery(bbox)
 
-  try {
-    console.info(`[Traffic] Fetching road network for ${label ?? 'bbox'}...`)
-    const res = await fetch('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      body: `data=${encodeURIComponent(query)}`,
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    })
-
-    if (!res.ok) {
-      console.warn(`[Traffic] Overpass returned ${res.status}`)
-      return []
-    }
-
-    const data = await res.json()
-    const segments = parseOverpassResponse(data)
-    console.info(`[Traffic] Got ${segments.length} road segments for ${label ?? 'bbox'}`)
-
-    // Cache in IndexedDB
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      await set(cacheKey, { segments, timestamp: Date.now() } as CacheEntry)
-    } catch { /* cache write failure, non-critical */ }
+      if (attempt > 0) {
+        console.info(`[Traffic] Retry ${attempt}/${MAX_RETRIES} after delay...`)
+        await new Promise(r => setTimeout(r, RETRY_DELAY * attempt))
+      }
 
-    return segments
-  } catch (err) {
-    console.error('[Traffic] Overpass fetch failed:', err)
-    return []
+      console.info(`[Traffic] Fetching road network for ${label ?? 'bbox'}...`)
+      lastFetchTime = Date.now()
+      const res = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        body: `data=${encodeURIComponent(query)}`,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      })
+
+      if (res.status === 429) {
+        console.warn(`[Traffic] Overpass returned 429 (rate limited)`)
+        if (attempt < MAX_RETRIES) continue
+        // Exhausted retries — return last known good data
+        console.info(`[Traffic] Using ${lastFetchedSegments.length} previously fetched segments`)
+        return lastFetchedSegments
+      }
+
+      if (!res.ok) {
+        console.warn(`[Traffic] Overpass returned ${res.status}`)
+        return lastFetchedSegments.length > 0 ? lastFetchedSegments : []
+      }
+
+      const data = await res.json()
+      const segments = parseOverpassResponse(data)
+      console.info(`[Traffic] Got ${segments.length} road segments for ${label ?? 'bbox'}`)
+
+      lastFetchedSegments = segments
+
+      // Cache in IndexedDB
+      try {
+        await set(cacheKey, { segments, timestamp: Date.now() } as CacheEntry)
+      } catch { /* cache write failure, non-critical */ }
+
+      return segments
+    } catch (err) {
+      console.error('[Traffic] Overpass fetch failed:', err)
+      if (attempt >= MAX_RETRIES) {
+        return lastFetchedSegments.length > 0 ? lastFetchedSegments : []
+      }
+    }
   }
+
+  return lastFetchedSegments
 }
