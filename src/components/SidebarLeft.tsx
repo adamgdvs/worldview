@@ -1,7 +1,11 @@
+import { type MutableRefObject } from 'react'
+// @ts-ignore
+import type { Viewer } from 'cesium'
 import { useStore, type AviationFilter } from '../store'
 import { Plane, Satellite, Activity, Ship, Flame, Wind, Radio, Map, Shield, Car, Camera, Tag } from 'lucide-react'
 import { CollapsibleSection } from './ui/CollapsibleSection'
 import { SatelliteLookup } from './SatelliteLookup'
+import { ScenesPanel } from './ScenesPanel'
 
 const AVIATION_CATEGORIES: { id: AviationFilter; label: string; color: string }[] = [
   { id: 'civil',      label: 'Civil',      color: '#00F0FF' },
@@ -11,7 +15,7 @@ const AVIATION_CATEGORIES: { id: AviationFilter; label: string; color: string }[
   { id: 'unknown',    label: 'Unknown',    color: '#6B7280' },
 ]
 
-export function SidebarLeft() {
+export function SidebarLeft({ viewerRef }: { viewerRef: MutableRefObject<Viewer | null> }) {
   const { activeLayers, toggleLayer } = useStore()
   const cleanUI = useStore((s) => s.cleanUI)
   const aviationFilters = useStore((s) => s.aviationFilters)
@@ -213,25 +217,7 @@ export function SidebarLeft() {
 
       {/* SCENES */}
       <CollapsibleSection id="scenes" title="SCENES" standalone>
-        <div className="px-3 py-3 space-y-2">
-          <div className="flex items-center gap-2">
-            <select
-              disabled
-              className="flex-1 bg-[#0a1628] border border-worldview-border/30 text-[8px] text-[#304c78] px-2 py-1 font-mono cursor-not-allowed"
-            >
-              <option>Select scene...</option>
-            </select>
-            <button
-              disabled
-              className="px-2 py-1 border border-worldview-border/30 text-[8px] text-[#304c78] font-bold tracking-wider cursor-not-allowed"
-            >
-              NEW
-            </button>
-          </div>
-          <div className="text-center">
-            <span className="text-[8px] text-[#304c78] tracking-widest">COMING SOON</span>
-          </div>
-        </div>
+        <ScenesPanel viewerRef={viewerRef} />
       </CollapsibleSection>
     </div>
   )

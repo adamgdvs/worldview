@@ -11,10 +11,16 @@ export interface SeismicEvent {
   time: number        // Unix ms
 }
 
-export async function fetchSeismicEvents(minMag = 2.5, limit = 200): Promise<SeismicEvent[]> {
-  const url =
+export async function fetchSeismicEvents(
+  minMag = 2.5,
+  limit = 200,
+  opts?: { startTime?: string; endTime?: string },
+): Promise<SeismicEvent[]> {
+  let url =
     `https://earthquake.usgs.gov/fdsnws/event/1/query` +
     `?format=geojson&limit=${limit}&minmagnitude=${minMag}&orderby=time`
+  if (opts?.startTime) url += `&starttime=${opts.startTime}`
+  if (opts?.endTime) url += `&endtime=${opts.endTime}`
 
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(10_000) })

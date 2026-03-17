@@ -191,3 +191,56 @@ export async function fetchFlights(
   console.warn('[Aviation] airplanes.live returned empty, trying OpenSky...')
   return fetchOpenSkyFlights(bbox)
 }
+
+/**
+ * Fetch historical flight data at a specific Unix timestamp (seconds).
+ * Uses OpenSky's `time` parameter (free tier: last ~1 hour only).
+ */
+export async function fetchFlightsAtTime(unixSeconds: number): Promise<FlightState[]> {
+  const qs = `lamin=-90&lomin=-180&lamax=90&lomax=180&time=${Math.floor(unixSeconds)}`
+  const url = import.meta.env.DEV
+    ? `/opensky/api/states/all?${qs}`
+    : `https://opensky-network.org/api/states/all?${qs}`
+
+  const token = await getOpenSkyToken()
+  const fetchOptions: RequestInit = token
+    ? { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) }
+    : { signal: AbortSignal.timeout(15_000) }
+
+  try {
+    const response = await fetch(url, fetchOptions)
+    if (!response.ok) {
+      console.warn(`[OpenSky Historical] HTTP ${response.status}`)
+      return []
+    }
+    const data = await response.json()
+    if (!data?.states) return []
+
+    console.info(`[OpenSky Historical] ${data.states.length} states at t=${unixSeconds}`)
+    return (data.states as any[][])
+      .map((s): FlightState => ({
+        icao24: s[0] ?? '',
+        callsign: s[1]?.trim() ?? '',
+        origin_country: s[2] ?? '',
+        time_position: s[3],
+        last_contact: s[4] ?? 0,
+        longitude: s[5],
+        latitude: s[6],
+        baro_altitude: s[7],
+        on_ground: s[8] ?? false,
+        velocity: s[9],
+        true_track: s[10],
+        vertical_rate: s[11],
+        sensors: s[12],
+        geo_altitude: s[13],
+        squawk: s[14],
+        spi: s[15] ?? false,
+        position_source: s[16] ?? 0,
+        military: false,
+      }))
+      .filter(f => f.icao24 && f.latitude !== null && f.longitude !== null)
+  } catch (err) {
+    console.error('[OpenSky Historical] Fetch failed:', err)
+    return []
+  }
+}

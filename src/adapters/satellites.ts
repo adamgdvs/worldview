@@ -187,6 +187,24 @@ export function propagateAll(): SatelliteState[] {
 }
 
 /**
+ * Re-propagate all stored TLE records to a specific Date (for playback mode).
+ * Orbit segments are always recomputed since the date differs from live.
+ */
+export function propagateAllAtTime(date: Date): SatelliteState[] {
+  if (tleStore.size === 0) return []
+
+  const states: SatelliteState[] = []
+  for (const rec of tleStore.values()) {
+    const s = propagateRecord(rec, date, false)
+    if (s) {
+      s.orbitSegments = computeOrbitSegments(rec.satrec, s.altitudeKm, date)
+      states.push(s)
+    }
+  }
+  return states
+}
+
+/**
  * Search loaded satellites by NORAD ID or name substring.
  */
 export function searchSatellites(query: string): Array<{ id: string; name: string }> {

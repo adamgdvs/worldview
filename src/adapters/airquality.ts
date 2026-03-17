@@ -1,5 +1,5 @@
-// OpenAQ v3 API — no API key required for basic access
-// Fetches latest PM2.5 measurements from monitoring stations worldwide
+// sensor.community (formerly Luftdaten) — completely free, no API key
+// Fetches latest PM2.5/PM10 from ~20,000+ citizen science sensors worldwide
 
 export interface AQStation {
   id: number
@@ -43,16 +43,15 @@ export function aqiColor(aqi: number): string {
 }
 
 /**
- * Fetch latest PM2.5 readings worldwide from OpenAQ v3.
+ * Fetch latest PM2.5 readings worldwide from sensor.community.
+ * SDS011 sensors report P1 (PM10) and P2 (PM2.5).
  * Returns up to `limit` stations with valid coordinates.
  */
-export async function fetchAirQuality(limit = 1000): Promise<AQStation[]> {
+export async function fetchAirQuality(limit = 2000): Promise<AQStation[]> {
   try {
-    // OpenAQ v3 latest measurements endpoint — PM2.5 only
-    const url = `https://api.openaq.org/v3/locations?limit=${limit}&parameter_id=2&order_by=lastUpdated&sort_order=desc`
-
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(15_000),
+    // SDS011 is the most common PM sensor on sensor.community
+    const res = await fetch('https://data.sensor.community/airrohr/v1/filter/type=SDS011', {
+      signal: AbortSignal.timeout(30_000),
       headers: { 'Accept': 'application/json' },
     })
 
@@ -62,39 +61,49 @@ export async function fetchAirQuality(limit = 1000): Promise<AQStation[]> {
     }
 
     const data = await res.json()
+    if (!Array.isArray(data)) return []
+
     const results: AQStation[] = []
+    const seen = new Set<string>()  // dedupe by location
 
-    for (const loc of (data.results ?? [])) {
-      const coords = loc.coordinates
-      if (!coords?.latitude || !coords?.longitude) continue
+    for (const entry of data) {
+      if (results.length >= limit) break
 
-      // Find PM2.5 parameter
-      const pm25Param = loc.sensors?.find((s: any) =>
-        s.parameter?.name === 'pm25' || s.parameter?.id === 2
+      const loc = entry.location
+      if (!loc?.latitude || !loc?.longitude) continue
+
+      const lat = parseFloat(loc.latitude)
+      const lon = parseFloat(loc.longitude)
+      if (isNaN(lat) || isNaN(lon) || lat === 0 || lon === 0) continue
+
+      // Deduplicate by rounded location (many sensors are co-located)
+      const locKey = `${lat.toFixed(2)},${lon.toFixed(2)}`
+      if (seen.has(locKey)) continue
+      seen.add(locKey)
+
+      // Extract PM2.5 (P2) value from sensor data values
+      const pm25Val = entry.sensordatavalues?.find(
+        (v: any) => v.value_type === 'P2'
       )
+      if (!pm25Val) continue
 
-      // Use the latest value from the location summary if available
-      const latestValue = pm25Param?.summary?.last?.value
-        ?? loc.parameters?.find((p: any) => p.id === 2 || p.name === 'pm25')?.lastValue
-        ?? null
+      const pm25 = parseFloat(pm25Val.value)
+      if (isNaN(pm25) || pm25 < 0) continue
 
-      if (latestValue == null || latestValue < 0) continue
-
-      const pm25 = Math.round(latestValue * 10) / 10
       results.push({
-        id: loc.id,
-        name: loc.name ?? `Station ${loc.id}`,
-        latitude: coords.latitude,
-        longitude: coords.longitude,
-        pm25,
+        id: entry.sensor?.id ?? results.length,
+        name: `Sensor ${entry.sensor?.id ?? '?'}`,
+        latitude: lat,
+        longitude: lon,
+        pm25: Math.round(pm25 * 10) / 10,
         aqi: pm25ToAQI(pm25),
         parameter: 'pm25',
-        lastUpdated: loc.datetimeLast?.utc ?? '',
-        country: loc.country?.code ?? '',
+        lastUpdated: entry.timestamp ?? '',
+        country: loc.country ?? '',
       })
     }
 
-    console.info(`[AirQ] Loaded ${results.length} stations`)
+    console.info(`[AirQ] Loaded ${results.length} stations from sensor.community`)
     return results
   } catch (err) {
     console.error('[AirQ] Fetch failed:', err)

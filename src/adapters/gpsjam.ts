@@ -36,10 +36,10 @@ export function jamColor(level: JamLevel): string {
  * Returns H3 cells with interference ratios and polygon boundaries.
  */
 export async function fetchGpsJamData(date?: string): Promise<GpsJamCell[]> {
-  // Default to yesterday (data is typically 1 day behind)
+  // Default to 2 days ago (data is typically 2 days behind)
   if (!date) {
     const d = new Date()
-    d.setDate(d.getDate() - 1)
+    d.setDate(d.getDate() - 2)
     date = d.toISOString().slice(0, 10)
   }
 

@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type MutableRefObject } from 'react'
 import { fetchFlights, type FlightState } from '../adapters/aviation'
 import { AISAdapter, type VesselState } from '../adapters/maritime'
 import { fetchSeismicEvents, type SeismicEvent } from '../adapters/seismic'
 import { fetchWildfires, type WildfireHotspot } from '../adapters/wildfire'
-import { fetchSatellites, propagateAll, type SatelliteState } from '../adapters/satellites'
+import { fetchSatellites, propagateAll, propagateAllAtTime, type SatelliteState } from '../adapters/satellites'
 import { fetchAirQuality, type AQStation } from '../adapters/airquality'
 import { fetchWeather, type WeatherPoint } from '../adapters/weather'
 import { fetchGpsJamData, type GpsJamCell } from '../adapters/gpsjam'
@@ -11,7 +11,7 @@ import { fetchRoadNetworkByBbox, type RoadSegment } from '../adapters/traffic'
 import { loadGlobalCCTVFeeds, type CCTVFeed } from '../adapters/cctv'
 import { useStore } from '../store'
 
-export function useEntities() {
+export function useEntities(playbackTimeRef?: MutableRefObject<number>) {
   const [flights, setFlights] = useState<Map<string, FlightState>>(new Map())
   const [militaryFlights, setMilitaryFlights] = useState<Map<string, FlightState>>(new Map())
   const [vessels, setVessels] = useState<Map<number, VesselState>>(new Map())
@@ -24,6 +24,7 @@ export function useEntities() {
   const [roadSegments, setRoadSegments] = useState<RoadSegment[]>([])
   const [cctvFeeds, setCctvFeeds] = useState<CCTVFeed[]>([])
   const { activeLayers } = useStore()
+  const playbackMode = useStore((s) => s.playbackMode)
   const aisAdapterRef = useRef<AISAdapter | null>(null)
 
   // ── Data caches: persist across toggle cycles for instant restore ────────
@@ -57,11 +58,42 @@ export function useEntities() {
       return
     }
 
+    if (playbackMode) {
+      // In playback: do a one-time snapshot fetch so there's data to display
+      // Use cache if available, otherwise fetch live data as a snapshot
+      if (civilCache.current.size > 0 || milCache.current.size > 0) {
+        if (wantCivil) setFlights(civilCache.current)
+        if (wantMil) setMilitaryFlights(milCache.current)
+      } else {
+        // Fetch once for playback snapshot
+        const fetchSnapshot = async () => {
+          const bbox = { minLat: -90, maxLat: 90, minLon: -180, maxLon: 180 }
+          const allFlights = await fetchFlights(bbox)
+          if (!allFlights.length) return
+
+          const civil = new Map<string, FlightState>()
+          const mil   = new Map<string, FlightState>()
+          for (const f of allFlights) {
+            if (f.latitude == null || f.longitude == null || f.on_ground) continue
+            if (f.military) mil.set(f.icao24, f)
+            else civil.set(f.icao24, f)
+          }
+          civilCache.current = civil
+          milCache.current = mil
+          if (wantCivil) setFlights(civil)
+          if (wantMil) setMilitaryFlights(mil)
+        }
+        fetchSnapshot()
+      }
+      return
+    }
+
     // Instant restore from cache
     if (wantCivil && civilCache.current.size > 0) setFlights(civilCache.current)
     if (wantMil && milCache.current.size > 0) setMilitaryFlights(milCache.current)
 
     const poll = async () => {
+      if (useStore.getState().playbackMode) return
       const bbox = { minLat: -90, maxLat: 90, minLon: -180, maxLon: 180 }
       const allFlights = await fetchFlights(bbox)
       if (!allFlights.length) return
@@ -100,11 +132,12 @@ export function useEntities() {
     poll()
     const interval = setInterval(poll, 30_000)
     return () => clearInterval(interval)
-  }, [wantCivil, wantMil])
+  }, [wantCivil, wantMil, playbackMode])
 
   // ── Maritime WebSocket ─────────────────────────────────────────────────────
   useEffect(() => {
-    if (!wantMaritime) {
+    if (!wantMaritime || playbackMode) {
+      if (playbackMode) return // freeze at current data — no historical API
       aisAdapterRef.current?.disconnect()
       aisAdapterRef.current = null
       setVessels(new Map())
@@ -133,7 +166,27 @@ export function useEntities() {
       })
       aisAdapterRef.current.connect()
     }
-  }, [wantMaritime])
+  }, [wantMaritime, playbackMode])
+
+  // Helper: one-time fetch for playback mode if cache is empty
+  const playbackFetchOnce = <T,>(
+    want: boolean,
+    cache: React.MutableRefObject<T[]>,
+    setter: (v: T[]) => void,
+    fetcher: () => Promise<T[]>,
+  ) => {
+    if (!want) { setter([]); return }
+    if (cache.current.length > 0) {
+      setter(cache.current)
+    } else {
+      fetcher().then((data) => {
+        if (data.length) {
+          cache.current = data
+          setter(data)
+        }
+      })
+    }
+  }
 
   // ── Seismic (USGS) — refresh every 5 minutes ───────────────────────────────
   useEffect(() => {
@@ -142,10 +195,16 @@ export function useEntities() {
       return
     }
 
+    if (playbackMode) {
+      playbackFetchOnce(wantSeismic, seismicCache, setSeismicEvents, () => fetchSeismicEvents(2.5, 200))
+      return
+    }
+
     // Instant restore from cache
     if (seismicCache.current.length > 0) setSeismicEvents(seismicCache.current)
 
     const poll = async () => {
+      if (useStore.getState().playbackMode) return
       const events = await fetchSeismicEvents(2.5, 200)
       if (events.length) {
         seismicCache.current = events
@@ -156,7 +215,7 @@ export function useEntities() {
     poll()
     const interval = setInterval(poll, 5 * 60_000)
     return () => clearInterval(interval)
-  }, [wantSeismic])
+  }, [wantSeismic, playbackMode])
 
   // ── Wildfire (NASA FIRMS) — refresh every 15 minutes ─────────────────────
   useEffect(() => {
@@ -165,10 +224,16 @@ export function useEntities() {
       return
     }
 
+    if (playbackMode) {
+      playbackFetchOnce(wantFires, fireCache, setWildfires, fetchWildfires)
+      return
+    }
+
     // Instant restore from cache
     if (fireCache.current.length > 0) setWildfires(fireCache.current)
 
     const poll = async () => {
+      if (useStore.getState().playbackMode) return
       const hotspots = await fetchWildfires()
       if (hotspots.length) {
         fireCache.current = hotspots
@@ -179,7 +244,7 @@ export function useEntities() {
     poll()
     const interval = setInterval(poll, 15 * 60_000)
     return () => clearInterval(interval)
-  }, [wantFires])
+  }, [wantFires, playbackMode])
 
   // ── Satellites — fetch TLEs once, propagate positions every 3s ────────────
   useEffect(() => {
@@ -193,7 +258,7 @@ export function useEntities() {
     // Instant restore from cache
     if (satCache.current.length > 0) setSats(satCache.current)
 
-    // Initial TLE fetch (slow, runs once)
+    // Initial TLE fetch (slow, runs once) — needed for both live and playback
     const init = async () => {
       const states = await fetchSatellites(['stations'])
       if (cancelled) return
@@ -207,15 +272,22 @@ export function useEntities() {
     // Fast propagation timer — re-compute positions from stored TLEs every 3s
     const propInterval = setInterval(() => {
       if (cancelled) return
-      const states = propagateAll()
+      // In playback mode, propagate to playback time
+      const propDate = (useStore.getState().playbackMode && playbackTimeRef?.current)
+        ? new Date(playbackTimeRef.current)
+        : new Date()
+      const states = useStore.getState().playbackMode
+        ? propagateAllAtTime(propDate)
+        : propagateAll()
       if (states.length) {
         satCache.current = states
         setSats(states)
       }
     }, 3_000)
 
-    // Re-fetch TLEs every 10 minutes to pick up new satellites
+    // Re-fetch TLEs every 10 minutes (skip in playback mode)
     const fetchInterval = setInterval(async () => {
+      if (useStore.getState().playbackMode) return
       const states = await fetchSatellites(['stations'])
       if (cancelled) return
       if (states.length) {
@@ -229,7 +301,7 @@ export function useEntities() {
       clearInterval(propInterval)
       clearInterval(fetchInterval)
     }
-  }, [wantSats])
+  }, [wantSats, playbackMode])
 
   // ── Air Quality (OpenAQ) — refresh every 10 minutes ──────────────────────
   useEffect(() => {
@@ -238,9 +310,15 @@ export function useEntities() {
       return
     }
 
+    if (playbackMode) {
+      playbackFetchOnce(wantAirQ, aqCache, setAirQuality, () => fetchAirQuality(1000))
+      return
+    }
+
     if (aqCache.current.length > 0) setAirQuality(aqCache.current)
 
     const poll = async () => {
+      if (useStore.getState().playbackMode) return
       const stations = await fetchAirQuality(1000)
       if (stations.length) {
         aqCache.current = stations
@@ -251,7 +329,7 @@ export function useEntities() {
     poll()
     const interval = setInterval(poll, 10 * 60_000)
     return () => clearInterval(interval)
-  }, [wantAirQ])
+  }, [wantAirQ, playbackMode])
 
   // ── Weather (Open-Meteo) — refresh every 15 minutes ─────────────────────
   useEffect(() => {
@@ -260,9 +338,15 @@ export function useEntities() {
       return
     }
 
+    if (playbackMode) {
+      playbackFetchOnce(wantWeather, weatherCache, setWeather, fetchWeather)
+      return
+    }
+
     if (weatherCache.current.length > 0) setWeather(weatherCache.current)
 
     const poll = async () => {
+      if (useStore.getState().playbackMode) return
       const points = await fetchWeather()
       if (points.length) {
         weatherCache.current = points
@@ -273,7 +357,7 @@ export function useEntities() {
     poll()
     const interval = setInterval(poll, 15 * 60_000)
     return () => clearInterval(interval)
-  }, [wantWeather])
+  }, [wantWeather, playbackMode])
 
   // ── GPS Jamming (gpsjam.org) — refresh every 6 hours (daily data) ────────
   useEffect(() => {
@@ -282,9 +366,15 @@ export function useEntities() {
       return
     }
 
+    if (playbackMode) {
+      playbackFetchOnce(wantGpsJam, gpsJamCache, setGpsJam, fetchGpsJamData)
+      return
+    }
+
     if (gpsJamCache.current.length > 0) setGpsJam(gpsJamCache.current)
 
     const poll = async () => {
+      if (useStore.getState().playbackMode) return
       const cells = await fetchGpsJamData()
       if (cells.length) {
         gpsJamCache.current = cells
@@ -295,7 +385,7 @@ export function useEntities() {
     poll()
     const interval = setInterval(poll, 6 * 60 * 60_000) // refresh every 6h
     return () => clearInterval(interval)
-  }, [wantGpsJam])
+  }, [wantGpsJam, playbackMode])
 
   // ── Traffic (Overpass) — fetch road network for camera viewport ─────────
   const cameraBbox = useStore((s) => s.cameraBbox)
