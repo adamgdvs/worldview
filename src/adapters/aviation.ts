@@ -169,7 +169,12 @@ const WORLD_HUBS: [number, number][] = [
   [-33.9, 151.2], [-37.7, 144.8], [-27.4, 153.1],
 ]
 
-const SWEEP_CAP = 24  // ≈8 serialized queries per provider ≈ 9 s per sweep
+const SWEEP_CAP = 32  // ≈11 serialized queries per provider ≈ 12 s per sweep
+
+// Alternate polls shift the grid by half a cell. Aircraft persist ~5 min on
+// screen, so interleaved grids fill each other's corner gaps within a minute
+// even when the cap forces spacing wider than the 250 nm query circles.
+let _sweepPhase = 0
 
 let _sweepCache: { key: string; data: FlightState[]; at: number } | null = null
 
@@ -213,9 +218,10 @@ async function fetchSweep(
     let lonStep = 6.5 / lonScale
     const count = () => (Math.ceil(latSpan / latStep)) * (Math.ceil(lonSpan / lonStep))
     while (count() > SWEEP_CAP) { latStep *= 1.3; lonStep *= 1.3 }
+    const phase = (_sweepPhase++ % 2) / 2  // 0 or 0.5 cell offset
     points = []
-    for (let la = bbox.minLat + latStep / 2; la < bbox.maxLat; la += latStep) {
-      for (let lo = bbox.minLon + lonStep / 2; lo < bbox.maxLon; lo += lonStep) {
+    for (let la = bbox.minLat + latStep * (0.5 + phase); la < bbox.maxLat; la += latStep) {
+      for (let lo = bbox.minLon + lonStep * (0.5 + phase); lo < bbox.maxLon; lo += lonStep) {
         points.push([Math.max(-85, Math.min(85, la)), lo])
       }
     }
