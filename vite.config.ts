@@ -19,6 +19,12 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/adsbfi/, ''),
         },
+        // adsb.lol sends no CORS headers — must proxy (airplanes.live is ACAO:* so it's called direct)
+        '/adsblol': {
+          target: 'https://api.adsb.lol',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/adsblol/, ''),
+        },
         '/celestrak': {
           target: 'https://celestrak.org',
           changeOrigin: true,

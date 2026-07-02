@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MutableRefObject } from 'react'
-import { fetchFlights, fetchFlightsAtTime, fetchMilitaryFlights, isMilitaryFlight, type FlightState } from '../adapters/aviation'
+import { fetchFlights, fetchFlightsAtTime, fetchMilitaryFlights, getOpenSkyStatus, isMilitaryFlight, type FlightState } from '../adapters/aviation'
 import { AISAdapter, type VesselState } from '../adapters/maritime'
 import { fetchSeismicEvents, type SeismicEvent } from '../adapters/seismic'
 import { fetchWildfires, type WildfireHotspot } from '../adapters/wildfire'
@@ -163,7 +163,11 @@ export function useEntities(playbackTimeRef?: MutableRefObject<number>) {
           wantMil ? fetchMilitaryFlights() : Promise.resolve([] as FlightState[]),
         ])
         if (!allFlights.length && !milFeed.length) {
-          if (civilCache.current.size === 0) setLayerError('avi-civil', 'Sources rate-limited — retrying (add OpenSky API creds to raise limits)')
+          const osStatus = getOpenSkyStatus()
+          const msg = osStatus === 'invalid-credentials'
+            ? 'OpenSky credentials rejected — regenerate API client at opensky-network.org; using fallback feeds'
+            : 'All flight sources rate-limited — retrying'
+          if (civilCache.current.size === 0) setLayerError('avi-civil', msg)
           setLayerLoading('avi-civil', false)
           setLayerLoading('avi-mil', false)
           return

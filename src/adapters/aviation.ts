@@ -70,31 +70,128 @@ function parseADSBv2(acArray: any[], now: number): FlightState[] {
     .filter(f => f.icao24 && f.latitude !== null && f.longitude !== null)
 }
 
-// ── adsb.fi opendata — free, proxied via /adsbfi to avoid CORS ──────────────
-// API: /api/v2/lat/{lat}/lon/{lon}/dist/{radius_nm}  (max radius 250 nm)
-// Response: { now, aircraft: [...], resultCount } in ADSBx-v2 format
-async function fetchAdsbFiPoint(lat: number, lon: number, distNm = 250): Promise<FlightState[]> {
+// ── ADSBx-v2-format point providers ─────────────────────────────────────────
+// Three independent free feeds, all speaking the same v2 dialect. Each has its
+// own rate limit (adsb.fi: 1 req/s per IP), so requests are serialized
+// per-provider and providers are rotated for multi-point sweeps.
+// adsb.lol has no CORS headers → proxied; airplanes.live sends ACAO:* → direct.
+interface AdsbProvider {
+  name: string
+  pointUrl: (lat: number, lon: number, distNm: number) => string
+  milUrl: string | null
+  minGapMs: number
+  nextAt: number
+}
+
+const ADSB_PROVIDERS: AdsbProvider[] = [
+  {
+    name: 'adsb.lol',
+    pointUrl: (lat, lon, d) => `/adsblol/v2/lat/${lat.toFixed(3)}/lon/${lon.toFixed(3)}/dist/${d}`,
+    milUrl: '/adsblol/v2/mil',
+    minGapMs: 1_100,
+    nextAt: 0,
+  },
+  {
+    name: 'airplanes.live',
+    pointUrl: (lat, lon, d) => `https://api.airplanes.live/v2/point/${lat.toFixed(3)}/${lon.toFixed(3)}/${d}`,
+    milUrl: 'https://api.airplanes.live/v2/mil',
+    minGapMs: 1_100,
+    nextAt: 0,
+  },
+  {
+    name: 'adsb.fi',
+    pointUrl: (lat, lon, d) => `/adsbfi/api/v2/lat/${lat.toFixed(3)}/lon/${lon.toFixed(3)}/dist/${d}`,
+    milUrl: '/adsbfi/api/v2/mil',
+    minGapMs: 1_100,
+    nextAt: 0,
+  },
+]
+
+// Serialize requests per provider so we never violate its rate limit even
+// when the civil poll and mil feed fire in the same tick.
+async function providerFetch(p: AdsbProvider, url: string): Promise<FlightState[] | null> {
+  const wait = p.nextAt - Date.now()
+  p.nextAt = Math.max(p.nextAt, Date.now()) + p.minGapMs
+  if (wait > 0) await new Promise(r => setTimeout(r, wait))
   try {
-    const res = await fetch(`/adsbfi/api/v2/lat/${lat.toFixed(3)}/lon/${lon.toFixed(3)}/dist/${distNm}`, {
-      signal: AbortSignal.timeout(20_000),
-    })
+    const res = await fetch(url, { signal: AbortSignal.timeout(20_000) })
     if (!res.ok) {
-      console.warn(`[adsb.fi] HTTP ${res.status}`)
-      return []
+      console.warn(`[${p.name}] HTTP ${res.status}`)
+      return null
     }
     const data = await res.json()
     const acArray = (data.aircraft ?? data.ac ?? []) as any[]
-    console.info(`[adsb.fi] ${acArray.length} aircraft received`)
     return parseADSBv2(acArray, epochSeconds(data.now))
   } catch (err) {
-    console.error('[adsb.fi] Fetch failed:', err)
-    return []
+    console.warn(`[${p.name}] fetch failed:`, err)
+    return null
   }
 }
 
-// ── adsb.fi military feed — all aircraft flagged military, global ───────────
-// adsb.fi rate-limits aggressively (1 req/s); dedupe concurrent calls and
-// cache briefly so StrictMode double-effects don't trigger 429s.
+// Point query with provider rotation — tries each provider once.
+let _pointRotation = 0
+async function fetchAdsbPoint(lat: number, lon: number, distNm = 250): Promise<FlightState[]> {
+  for (let i = 0; i < ADSB_PROVIDERS.length; i++) {
+    const p = ADSB_PROVIDERS[(_pointRotation + i) % ADSB_PROVIDERS.length]
+    const result = await providerFetch(p, p.pointUrl(lat, lon, distNm))
+    if (result && result.length) {
+      _pointRotation = (_pointRotation + i + 1) % ADSB_PROVIDERS.length
+      console.info(`[${p.name}] ${result.length} aircraft received`)
+      return result
+    }
+  }
+  return []
+}
+
+// ── Global fallback sweep — point queries over the world's traffic hubs ─────
+// A 250 nm point query only covers ~460 km, so a "global" view is stitched
+// from hub queries spread round-robin across providers (respecting per-
+// provider serialization). Coarse but keeps the layer alive when OpenSky
+// is down or rate-limited.
+const WORLD_HUBS: [number, number][] = [
+  [40.7, -74.0],   // US East (NYC)
+  [41.9, -87.6],   // US Central (Chicago)
+  [34.0, -118.2],  // US West (LA)
+  [29.8, -95.4],   // US South (Houston)
+  [51.5, -0.1],    // UK/W. Europe (London)
+  [48.9, 8.2],     // Central Europe (Frankfurt/Stuttgart)
+  [41.0, 28.9],    // E. Med (Istanbul)
+  [25.3, 55.4],    // Gulf (Dubai)
+  [28.6, 77.2],    // South Asia (Delhi)
+  [31.2, 121.5],   // China (Shanghai)
+  [35.7, 139.7],   // Japan (Tokyo)
+  [1.35, 103.99],  // SE Asia (Singapore)
+  [-23.5, -46.6],  // South America (São Paulo)
+  [-33.9, 151.2],  // Australia (Sydney)
+]
+
+let _sweepCache: { data: FlightState[]; at: number } | null = null
+
+async function fetchGlobalSweep(): Promise<FlightState[]> {
+  if (_sweepCache && Date.now() - _sweepCache.at < 25_000) return _sweepCache.data
+
+  // Distribute hubs across providers; each provider works its share serially
+  const shares: [AdsbProvider, [number, number][]][] = ADSB_PROVIDERS.map((p, i) =>
+    [p, WORLD_HUBS.filter((_, h) => h % ADSB_PROVIDERS.length === i)])
+
+  const results = await Promise.all(shares.map(async ([p, hubs]) => {
+    const out: FlightState[] = []
+    for (const [lat, lon] of hubs) {
+      const r = await providerFetch(p, p.pointUrl(lat, lon, 250))
+      if (r) out.push(...r)
+    }
+    return out
+  }))
+
+  const merged = new Map<string, FlightState>()
+  for (const batch of results) for (const f of batch) merged.set(f.icao24, f)
+  const data = [...merged.values()]
+  console.info(`[Aviation] Global sweep: ${data.length} aircraft from ${WORLD_HUBS.length} hubs`)
+  if (data.length) _sweepCache = { data, at: Date.now() }
+  return data
+}
+
+// ── Military feed — adsb.lol primary, airplanes.live/adsb.fi fallback ───────
 let _milInFlight: Promise<FlightState[]> | null = null
 let _milCache: { data: FlightState[]; at: number } | null = null
 
@@ -104,18 +201,16 @@ export async function fetchMilitaryFlights(): Promise<FlightState[]> {
 
   _milInFlight = (async () => {
     try {
-      const res = await fetch('/adsbfi/api/v2/mil', { signal: AbortSignal.timeout(20_000) })
-      if (!res.ok) {
-        console.warn(`[adsb.fi mil] HTTP ${res.status}`)
-        return _milCache?.data ?? []
+      for (const p of ADSB_PROVIDERS) {
+        if (!p.milUrl) continue
+        const parsed = await providerFetch(p, p.milUrl)
+        if (parsed && parsed.length) {
+          const flagged = parsed.map(f => ({ ...f, military: true }))
+          _milCache = { data: flagged, at: Date.now() }
+          console.info(`[${p.name} mil] ${flagged.length} military aircraft`)
+          return flagged
+        }
       }
-      const data = await res.json()
-      const acArray = (data.aircraft ?? data.ac ?? []) as any[]
-      const parsed = parseADSBv2(acArray, epochSeconds(data.now)).map(f => ({ ...f, military: true }))
-      _milCache = { data: parsed, at: Date.now() }
-      return parsed
-    } catch (err) {
-      console.error('[adsb.fi mil] Fetch failed:', err)
       return _milCache?.data ?? []
     } finally {
       _milInFlight = null
@@ -128,6 +223,12 @@ export async function fetchMilitaryFlights(): Promise<FlightState[]> {
 // Credentials are handled SERVER-SIDE (Vite proxy in dev, Vercel edge in prod).
 // The client just calls /opensky-token with no credentials.
 let _tokenCache: { token: string; expiresAt: number } | null = null
+
+// Last observed OpenSky failure mode — lets the UI show an accurate message
+// instead of a generic "rate limited" for what is actually a credentials problem.
+export type OpenSkyStatus = 'ok' | 'invalid-credentials' | 'rate-limited' | 'error' | 'unknown'
+let _openSkyStatus: OpenSkyStatus = 'unknown'
+export function getOpenSkyStatus(): OpenSkyStatus { return _openSkyStatus }
 
 async function getOpenSkyToken(): Promise<string | null> {
   if (_tokenCache && Date.now() < _tokenCache.expiresAt - 60_000) {
@@ -142,9 +243,15 @@ async function getOpenSkyToken(): Promise<string | null> {
       signal: AbortSignal.timeout(10_000),
     })
     if (!res.ok) {
-      console.warn(`[OpenSky OAuth] Token fetch failed: HTTP ${res.status}`)
+      if (res.status === 400 || res.status === 401) {
+        _openSkyStatus = 'invalid-credentials'
+        console.warn('[OpenSky OAuth] Credentials rejected — regenerate an API client at opensky-network.org (Account → API Client)')
+      } else {
+        console.warn(`[OpenSky OAuth] Token fetch failed: HTTP ${res.status}`)
+      }
       return null
     }
+    _openSkyStatus = 'ok'
     const data = await res.json()
     _tokenCache = { token: data.access_token, expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000 }
     console.info('[OpenSky OAuth] Token acquired, expires in', data.expires_in, 's')
@@ -177,10 +284,16 @@ async function fetchOpenSkyFlights(
       _tokenCache = null
       return []
     }
+    if (response.status === 429) {
+      if (_openSkyStatus !== 'invalid-credentials') _openSkyStatus = 'rate-limited'
+      console.warn('[OpenSky] 429 rate-limited')
+      return []
+    }
     if (!response.ok) {
       console.warn(`[OpenSky] HTTP ${response.status}`)
       return []
     }
+    _openSkyStatus = 'ok'
 
     const data = await response.json()
 
@@ -245,16 +358,16 @@ async function fetchFlightsUncached(
   const results = await fetchOpenSkyFlights(bbox)
   if (results.length > 0) return results
 
-  // Fall back to adsb.fi centered on the requested bbox (250 nm best-effort).
-  // Pointless for a global bbox — the centre would be (0,0) in the Atlantic.
+  // Global view: stitch a world snapshot from hub point-queries across the
+  // free ADSBx-v2 providers (adsb.lol / airplanes.live / adsb.fi).
   if (bbox.maxLat - bbox.minLat > 90) {
-    console.warn('[Aviation] OpenSky returned empty; no regional bbox for adsb.fi fallback')
-    return []
+    console.warn('[Aviation] OpenSky returned empty — running global hub sweep...')
+    return fetchGlobalSweep()
   }
-  console.warn('[Aviation] OpenSky returned empty, trying adsb.fi...')
+  console.warn('[Aviation] OpenSky returned empty — trying point providers...')
   const cLat = (bbox.minLat + bbox.maxLat) / 2
   const cLon = (bbox.minLon + bbox.maxLon) / 2
-  return fetchAdsbFiPoint(cLat, cLon)
+  return fetchAdsbPoint(cLat, cLon)
 }
 
 /**

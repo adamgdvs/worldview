@@ -10,7 +10,7 @@ import {
   Ion, createGooglePhotorealistic3DTileset, GoogleMaps,
   Math as CesiumMath,
   ScreenSpaceEventHandler, ScreenSpaceEventType, defined,
-  Matrix4,
+  Matrix4, ClassificationType, PolygonHierarchy,
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 import { SidebarLeft } from './components/SidebarLeft'
@@ -1051,6 +1051,126 @@ function App() {
     viewerRef.current?.scene.requestRender()
   }, [cctvCameras])
 
+  // ── CCTV projection frustum (selected camera) ─────────────────────────────
+  // Green sightline rays from the camera mount converging on a ground coverage
+  // wedge, plus a draped translucent coverage polygon (reference: WORLDVIEW
+  // CCTV mesh projection look).
+  const selectedCameraId = useStore((s) => s.selectedCameraId)
+  const cctvFrustumRef = useRef<any[]>([])
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer || viewer.isDestroyed()) return
+
+    for (const e of cctvFrustumRef.current) viewer.entities.remove(e)
+    cctvFrustumRef.current = []
+
+    const cam = wantCctv && selectedCameraId
+      ? cctvCameras.find(c => c.id === selectedCameraId)
+      : null
+    if (!cam || cam.latitude == null || cam.longitude == null) {
+      viewer.scene.requestRender()
+      return
+    }
+
+    const FOV_DEG = 56       // matches reference HUD readout
+    const RANGE_M = 220
+    const NEAR_M = 12
+    const MOUNT_M = 9        // typical pole/gantry mount height
+
+    // Heading from feed metadata ("NE", "North East", "Southbound"...) with a
+    // stable per-camera fallback so unlabeled cameras don't all face north.
+    const COMPASS: Record<string, number> = {
+      N: 0, NNE: 22.5, NE: 45, ENE: 67.5, E: 90, ESE: 112.5, SE: 135, SSE: 157.5,
+      S: 180, SSW: 202.5, SW: 225, WSW: 247.5, W: 270, WNW: 292.5, NW: 315, NNW: 337.5,
+    }
+    const headingDeg = (() => {
+      const vd = cam.viewDirection?.trim().toUpperCase()
+      if (vd) {
+        for (const tok of vd.replace(/[^A-Z]/g, ' ').split(/\s+/)) {
+          if (tok in COMPASS) return COMPASS[tok]
+        }
+        const words = vd.match(/NORTH|SOUTH|EAST|WEST/g)
+        if (words) {
+          const abbr = words.map(w => w[0]).join('')
+          if (abbr in COMPASS) return COMPASS[abbr]
+        }
+      }
+      let h = 0
+      for (let i = 0; i < cam.id.length; i++) h = (h * 31 + cam.id.charCodeAt(i)) >>> 0
+      return h % 360
+    })()
+
+    // Ground under photorealistic tiles ≠ ellipsoid 0 — sample if tiles are in
+    let groundH = 0
+    try {
+      const sampled = viewer.scene.sampleHeight(Cartographic.fromDegrees(cam.longitude, cam.latitude))
+      if (sampled !== undefined && isFinite(sampled)) groundH = sampled
+    } catch { /* tiles not loaded yet — ellipsoid fallback */ }
+
+    // Geodesic destination point from the camera along a bearing
+    const dest = (bearingDeg: number, distM: number): [number, number] => {
+      const R = 6_371_000
+      const br = bearingDeg * Math.PI / 180
+      const dr = distM / R
+      const lat1 = cam.latitude * Math.PI / 180
+      const lon1 = cam.longitude * Math.PI / 180
+      const lat2 = Math.asin(Math.sin(lat1) * Math.cos(dr) + Math.cos(lat1) * Math.sin(dr) * Math.cos(br))
+      const lon2 = lon1 + Math.atan2(
+        Math.sin(br) * Math.sin(dr) * Math.cos(lat1),
+        Math.cos(dr) - Math.sin(lat1) * Math.sin(lat2),
+      )
+      return [lon2 * 180 / Math.PI, lat2 * 180 / Math.PI]
+    }
+
+    const half = FOV_DEG / 2
+    const nearL = dest(headingDeg - half, NEAR_M)
+    const nearR = dest(headingDeg + half, NEAR_M)
+    const farL  = dest(headingDeg - half, RANGE_M)
+    const farR  = dest(headingDeg + half, RANGE_M)
+    const farC  = dest(headingDeg, RANGE_M)
+
+    const apex = Cartesian3.fromDegrees(cam.longitude, cam.latitude, groundH + MOUNT_M)
+    const GREEN = Color.fromCssColorString('#39FF6A')
+    const add = (e: any) => cctvFrustumRef.current.push(viewer.entities.add(e))
+
+    // Sightline rays: apex → far corners + center (converging-beam look)
+    for (const [rayLon, rayLat] of [farL, farC, farR]) {
+      add({
+        polyline: {
+          positions: [apex, Cartesian3.fromDegrees(rayLon, rayLat, groundH)],
+          width: 1.6,
+          material: GREEN.withAlpha(0.8),
+        },
+      })
+    }
+
+    // Coverage wedge perimeter, draped on the tiles
+    const perimeter = [nearL, farL, farR, nearR, nearL]
+      .map(([pLon, pLat]) => Cartesian3.fromDegrees(pLon, pLat))
+    add({
+      polyline: {
+        positions: perimeter,
+        width: 2,
+        material: GREEN.withAlpha(0.65),
+        clampToGround: true,
+      },
+    })
+
+    // Translucent coverage fill — classification drape (plain height-0 polygons
+    // are invisible under the photorealistic tileset)
+    add({
+      polygon: {
+        hierarchy: new PolygonHierarchy(
+          [nearL, farL, farR, nearR].map(([pLon, pLat]) => Cartesian3.fromDegrees(pLon, pLat)),
+        ),
+        material: GREEN.withAlpha(0.12),
+        classificationType: ClassificationType.BOTH,
+      },
+    })
+
+    viewer.scene.requestRender()
+  }, [selectedCameraId, cctvCameras, wantCctv])
+
   // ── Camera: fly to selected city (Nominatim smart centering) ────────────────
   // Fallback coords used when Nominatim is unavailable or for Global view
   const CITY_FALLBACKS: Record<string, { lat: number; lon: number; height: number; pitch: number }> = {
@@ -1292,6 +1412,12 @@ function App() {
   // ── Track entity: follow selected flight/satellite ─────────────────────────
   const trackInitRef = useRef<string | null>(null) // key of entity we've already flown to
 
+  // Satellite tracking camera: shallow pitch keeps the horizon in frame so
+  // projection sightlines read like the sensor-web reference imagery.
+  const SAT_TRACK_PITCH_DEG = -18
+  const satTrackRange = (altMeters: number) =>
+    Math.max(120_000, Math.min(altMeters * 0.8, 600_000))
+
   useEffect(() => {
     const viewer = viewerRef.current
     if (!viewer || viewer.isDestroyed()) return
@@ -1342,8 +1468,10 @@ function App() {
         lon = s.longitude
         lat = s.latitude
         alt = s.altitudeKm * 1000
-        range = Math.min(alt * 0.5, 500_000)
-        camPitchDeg = -55
+        // Shallow over-the-horizon framing: satellite against space, earth
+        // limb curving below (reference: WORLDVIEW-3 collection view)
+        range = satTrackRange(alt)
+        camPitchDeg = SAT_TRACK_PITCH_DEG
       }
     }
 
@@ -1362,9 +1490,10 @@ function App() {
           CesiumMath.toRadians(camPitchDeg),
           range,
         )
-        viewer.camera.flyTo({
-          destination: Cartesian3.fromDegrees(lon, lat, alt + range),
-          orientation: { heading: CesiumMath.toRadians(heading), pitch: CesiumMath.toRadians(camPitchDeg), roll: 0 },
+        // flyToBoundingSphere arrives already at the shallow offset — no
+        // overhead-then-snap jump like a plain flyTo would produce
+        viewer.camera.flyToBoundingSphere(new BoundingSphere(target, 0), {
+          offset: hpr,
           duration: 1.5,
           complete: () => {
             if (!viewer.isDestroyed()) {
@@ -1385,11 +1514,10 @@ function App() {
           // Extract altitude from Cartographic to compute range
           const carto = Cartographic.fromCartesian(pos)
           const satAlt = carto.height
-          const satRange = Math.min(satAlt * 0.5, 500_000)
           const satHpr = new HeadingPitchRange(
             CesiumMath.toRadians(0),
-            CesiumMath.toRadians(-55),
-            satRange,
+            CesiumMath.toRadians(SAT_TRACK_PITCH_DEG),
+            satTrackRange(satAlt),
           )
           viewer.camera.lookAt(pos, satHpr)
           viewer.scene.requestRender()
@@ -2207,8 +2335,7 @@ function App() {
     const KNOWN = new Set(['notable','stations','visual','weather','earth-obs','navigation','geo','sarsat','relay','comms','amateur','science','military','engineering'])
 
     const Re = 6_371_000
-    const SPOKES = 14
-    const ARC_SEGMENTS = 16  // points per spoke for smooth curvature
+    const SPOKES = 22
     const CAP = 120
 
     const visibleSats = sats.filter(s => {
@@ -2216,24 +2343,32 @@ function App() {
     }).slice(0, CAP)
     const currentIds = new Set<string>()
 
-    // Build curved arc: tight at satellite, fans out toward ground (like water from a hose)
-    const buildArc = (
-      satLon: number, satLat: number, h: number,
-      groundLon: number, groundLat: number
-    ): Cartesian3[] => {
-      const pts: Cartesian3[] = []
-      for (let s = 0; s <= ARC_SEGMENTS; s++) {
-        const t = s / ARC_SEGMENTS  // 0 = satellite, 1 = ground
-        // Cubic spread: spokes stay bundled near sat, fan out toward ground
-        const spread = t * t * t
-        const lat = satLat + spread * (groundLat - satLat)
-        const lon = satLon + spread * (groundLon - satLon)
-        // Altitude drops linearly from h to 0 with a gentle outward bow
-        const alt = h * (1 - t) + h * 0.08 * Math.sin(Math.PI * t)
-        pts.push(Cartesian3.fromDegrees(lon, lat, Math.max(alt, 0)))
-      }
-      return pts
+    // Deterministic per-sat/per-spoke scatter so ground targets look like
+    // real collection points (crossing web of straight sightlines, per the
+    // reference look) instead of a perfect circle — and stay stable frame to frame.
+    const hash01 = (str: string, salt: number): number => {
+      let h = 2166136261 ^ salt
+      for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) }
+      return ((h >>> 0) % 10000) / 10000
     }
+
+    // Straight sightline: satellite → scattered ground point inside footprint
+    const buildSightline = (
+      sat: { id: string; longitude: number; latitude: number }, h: number,
+      footprintRadiusDeg: number, i: number
+    ): Cartesian3[] => {
+      const angle = 2 * Math.PI * hash01(sat.id, i * 2 + 1)
+      const rFrac = 0.2 + 0.8 * Math.sqrt(hash01(sat.id, i * 2))
+      const groundLat = sat.latitude + rFrac * footprintRadiusDeg * Math.cos(angle)
+      const groundLon = sat.longitude + rFrac * footprintRadiusDeg * Math.sin(angle) / Math.cos(sat.latitude * Math.PI / 180)
+      return [
+        Cartesian3.fromDegrees(sat.longitude, sat.latitude, h),
+        Cartesian3.fromDegrees(groundLon, Math.max(-89, Math.min(89, groundLat)), 0),
+      ]
+    }
+
+    // Thin pale sightlines (reference: whitish hair-lines, not glowing colored arcs)
+    const LINE_COLOR = Color.fromCssColorString('#d8e8e4')
 
     for (const sat of visibleSats) {
       currentIds.add(sat.id)
@@ -2243,29 +2378,20 @@ function App() {
       if (centralAngle <= 0 || isNaN(centralAngle)) continue
 
       const footprintRadiusDeg = centralAngle * (180 / Math.PI)
-      const col = orbitColor(classifyOrbit(sat.altitudeKm))
 
       const existing = prevMap.get(sat.id)
       if (existing) {
         for (let i = 0; i < SPOKES; i++) {
-          const angle = (2 * Math.PI * i) / SPOKES
-          const groundLat = sat.latitude + footprintRadiusDeg * Math.cos(angle)
-          const groundLon = sat.longitude + footprintRadiusDeg * Math.sin(angle) / Math.cos(sat.latitude * Math.PI / 180)
-          if (existing[i]) existing[i].positions = buildArc(sat.longitude, sat.latitude, h, groundLon, groundLat)
+          if (existing[i]) existing[i].positions = buildSightline(sat, h, footprintRadiusDeg, i)
         }
       } else {
         const lines: any[] = []
         for (let i = 0; i < SPOKES; i++) {
-          const angle = (2 * Math.PI * i) / SPOKES
-          const groundLat = sat.latitude + footprintRadiusDeg * Math.cos(angle)
-          const groundLon = sat.longitude + footprintRadiusDeg * Math.sin(angle) / Math.cos(sat.latitude * Math.PI / 180)
           const line = projLines.add({
-            positions: buildArc(sat.longitude, sat.latitude, h, groundLon, groundLat),
-            width: 1.5,
-            material: Material.fromType('PolylineGlow', {
-              glowPower: 0.12,
-              taperPower: 0.7,
-              color: col.withAlpha(0.45),
+            positions: buildSightline(sat, h, footprintRadiusDeg, i),
+            width: 1,
+            material: Material.fromType('Color', {
+              color: LINE_COLOR.withAlpha(0.22 + 0.16 * hash01(sat.id, i + 977)),
             }),
           })
           lines.push(line)
