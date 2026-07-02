@@ -10,8 +10,6 @@ import {
   Ion, createGooglePhotorealistic3DTileset, GoogleMaps,
   Math as CesiumMath,
   ScreenSpaceEventHandler, ScreenSpaceEventType, defined,
-  ImageryLayer, GeographicTilingScheme,
-  UrlTemplateImageryProvider, WebMercatorTilingScheme,
   Matrix4,
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
@@ -34,13 +32,15 @@ import { TrafficParticleSystem } from './systems/TrafficParticles'
 import { CameraOrbitSystem } from './systems/CameraOrbit'
 import { EntityInterpolationSystem } from './systems/EntityInterpolation'
 import { HeatmapLayer, type ColorRampStop } from './systems/HeatmapLayer'
+import { TileDrapeLayer } from './systems/TileDrapeLayer'
+import { fetchRadarTileTemplate } from './adapters/weather'
 import { CCTVPanel } from './components/CCTVPanel'
 import { EntityTrackingPanel } from './components/EntityTrackingPanel'
 import { IntelFeed } from './components/IntelFeed'
 import { SatellitePanel } from './components/SatellitePanel'
 import { useCameras } from './hooks/useCameras'
 import { type CameraFeed } from './adapters/cctv'
-import { createTrafficSession, getTrafficTileUrl, TrafficDataSampler } from './adapters/trafficTiles'
+import { createTrafficSession, TrafficDataSampler } from './adapters/trafficTiles'
 import { trackSatelliteOrbit } from './adapters/satellites'
 
 Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN
@@ -299,7 +299,7 @@ function App() {
   const flightTrailPrimRef = useRef<Primitive | null>(null)
   const satOrbitPrimRef    = useRef<Primitive | null>(null)
   const aqHeatmapRef       = useRef<HeatmapLayer | null>(null)
-  const wxHeatmapRef       = useRef<HeatmapLayer | null>(null)
+  const radarDrapeRef      = useRef<TileDrapeLayer | null>(null)
   const seismicLabelsRef   = useRef<LabelCollection | null>(null)
   const fireLabelsRef      = useRef<LabelCollection | null>(null)
   const cctvBillboardsRef  = useRef<BillboardCollection | null>(null)
@@ -307,7 +307,7 @@ function App() {
   const crosshairBbRef     = useRef<BillboardCollection | null>(null)
   const crosshairImageRef  = useRef<string | null>(null)
   const crosshairBillboardRef = useRef<any>(null) // single billboard instance for per-frame updates
-  const nightLightsLayerRef = useRef<ImageryLayer | null>(null)
+  const nightLightsDrapeRef = useRef<TileDrapeLayer | null>(null)
   const gpsJamHeatmapRef = useRef<HeatmapLayer | null>(null)
   const satProjectionLinesRef = useRef<PolylineCollection | null>(null)
   const satProjectionIndexMap = useRef<Map<string, any[]>>(new Map())
@@ -328,14 +328,13 @@ function App() {
   const orbitSystemRef = useRef<CameraOrbitSystem | null>(null)
   const interpSystemRef = useRef<EntityInterpolationSystem | null>(null)
   const trafficSystemRef = useRef<TrafficParticleSystem | null>(null)
-  const trafficLayerRef = useRef<ImageryLayer | null>(null)
   const trafficSamplerRef = useRef<TrafficDataSampler | null>(null)
   const trafficSessionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const cctvIconRef = useRef<string | null>(null)
   const cctvIndexMap = useRef<Map<string, { billboard: any; label: any }>>(new Map())
 
   const { playbackTimeRef, tick: playbackTick } = usePlaybackEngine()
-  const { flights, militaryFlights, vessels, seismicEvents, wildfires, sats, airQuality, weather, gpsJam, roadSegments } = useEntities(playbackTimeRef)
+  const { flights, militaryFlights, vessels, seismicEvents, wildfires, sats, airQuality, gpsJam, roadSegments } = useEntities(playbackTimeRef)
   const { selectedCity, activeLayers } = useStore()
   const selectedLandmark = useStore((s) => s.selectedLandmark)
   const citySeq = useStore((s) => s._citySeq)
@@ -388,8 +387,6 @@ function App() {
   milFlightsRef.current = militaryFlights
   const airQualityRef = useRef(airQuality)
   airQualityRef.current = airQuality
-  const weatherRef = useRef(weather)
-  weatherRef.current = weather
 
   // ── Viewer init ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -515,22 +512,9 @@ function App() {
         if (viewer.isDestroyed()) return
         console.debug('[Traffic] Session created, expiry:', new Date(sess.expiry).toISOString())
 
-        const tileUrl = getTrafficTileUrl(sess.session)
-        console.debug('[Traffic] Tile URL template ready')
-
-        // Add CesiumJS imagery layer (Web Mercator tiles on 3D globe)
-        const provider = new UrlTemplateImageryProvider({
-          url: tileUrl,
-          minimumLevel: 0,
-          maximumLevel: 18,
-          tilingScheme: new WebMercatorTilingScheme(),
-          hasAlphaChannel: true,
-          credit: 'Google Traffic',
-        })
-        const layer = viewer.imageryLayers.addImageryProvider(provider)
-        layer.alpha = 0.7
-        layer.show = useStore.getState().activeLayers.includes('traffic')
-        trafficLayerRef.current = layer
+        // NOTE: no traffic ImageryLayer — imagery drapes on the ellipsoid globe,
+        // which is fully occluded by the Google photorealistic 3D tileset. The
+        // session is still needed for the congestion-color data sampler.
 
         // Create sampler and attach to particle system
         const sampler = new TrafficDataSampler(sess.session)
@@ -545,22 +529,6 @@ function App() {
               const newSess = await createTrafficSession()
               console.info('[Traffic] Session refreshed')
               sampler.updateSession(newSess.session)
-              if (trafficLayerRef.current) {
-                const wasVisible = trafficLayerRef.current.show
-                viewer.imageryLayers.remove(trafficLayerRef.current)
-                const newProvider = new UrlTemplateImageryProvider({
-                  url: getTrafficTileUrl(newSess.session),
-                  minimumLevel: 0,
-                  maximumLevel: 18,
-                  tilingScheme: new WebMercatorTilingScheme(),
-                  hasAlphaChannel: true,
-                  credit: 'Google Traffic',
-                })
-                const newLayer = viewer.imageryLayers.addImageryProvider(newProvider)
-                newLayer.alpha = 0.7
-                newLayer.show = wasVisible
-                trafficLayerRef.current = newLayer
-              }
               scheduleRefresh(newSess.expiry)
             } catch (err) {
               console.warn('[Traffic] Session refresh failed:', err)
@@ -728,8 +696,6 @@ function App() {
           data = wildfiresRef.current[idx]
         } else if (type === 'airq') {
           data = airQualityRef.current.find((s: any) => String(s.id) === key)
-        } else if (type === 'weather') {
-          data = weatherRef.current.find((w: any) => w.id === key)
         } else if (type === 'cctv') {
           // CCTV clicks go to CCTVPanel preview, not InspectPanel
           useStore.getState().setSelectedCameraId(key)
@@ -785,7 +751,7 @@ function App() {
           // collapsing the bbox to ~0 area. Pad to a minimum extent scaled
           // by altitude so viewport-based fetches (Overpass traffic) get a
           // usable region.
-          const minHalfExtent = Math.max(0.02, (height * 1.5) / 111_320)
+          const minHalfExtent = Math.max(0.04, (height * 1.5) / 111_320)
           const cLat = (Math.min(...lats) + Math.max(...lats)) / 2
           const cLon = (Math.min(...lons) + Math.max(...lons)) / 2
           const bbox: [number, number, number, number] = [
@@ -869,7 +835,6 @@ function App() {
       if (animFrame != null) cancelAnimationFrame(animFrame)
       ppManager.destroy()
       trafficSys.destroy()
-      if (trafficLayerRef.current) viewer.imageryLayers.remove(trafficLayerRef.current)
       if (trafficSessionTimerRef.current) clearTimeout(trafficSessionTimerRef.current)
       trafficSamplerRef.current?.clear()
       handler.destroy()
@@ -1008,14 +973,6 @@ function App() {
   useEffect(() => {
     trafficSystemRef.current?.setMaxParticles(trafficMaxParticles)
   }, [trafficMaxParticles])
-
-  // Toggle Google Traffic tile overlay visibility with traffic layer
-  const wantTraffic = activeLayers.includes('traffic')
-  useEffect(() => {
-    if (trafficLayerRef.current) {
-      trafficLayerRef.current.show = wantTraffic
-    }
-  }, [wantTraffic])
 
   // ── CCTV billboard + label sync (country-colored) ────────────────────────
   useEffect(() => {
@@ -2361,89 +2318,87 @@ function App() {
     return () => { aqHeatmapRef.current?.destroy(); aqHeatmapRef.current = null }
   }, [airQuality])
 
-  // ── Weather heatmap overlay ──────────────────────────────────────────────
-  // NWS radar reflectivity color scale — high contrast against ocean.
-  // Only shows precipitation events (drizzle, rain, snow, showers, thunderstorms).
-  const WX_RAMP: ColorRampStop[] = [
-    [0.0,  0x77, 0xDD, 0x77, 160],  // drizzle — light green
-    [0.15, 0x22, 0x99, 0x22, 180],  // light rain — dark green
-    [0.30, 0xFF, 0xFF, 0x33, 190],  // moderate rain — yellow
-    [0.50, 0xFF, 0xAA, 0x22, 200],  // heavy rain — orange
-    [0.70, 0xFF, 0x33, 0x33, 210],  // very heavy rain — red
-    [0.85, 0xDD, 0x44, 0xDD, 220],  // severe storms — purple/magenta
-    [1.0,  0xBB, 0xCC, 0xFF, 200],  // snow/ice — blue-white
-  ]
+  // ── Weather radar overlay (RainViewer) ──────────────────────────────────
+  // Traditional precipitation radar: global composite reflectivity tiles,
+  // mosaicked + reprojected onto a classification drape (visible over the
+  // photorealistic 3D tileset). Refreshes every 5 min (frames update ~10 min).
+  const wantWeather = activeLayers.includes('weather')
   useEffect(() => {
     const viewer = viewerRef.current
     if (!viewer || viewer.isDestroyed()) return
 
-    if (!wxHeatmapRef.current) {
-      // radius 45 ≈ 8° lon — overlaps nicely at 10°×15° dense grid spacing
-      wxHeatmapRef.current = new HeatmapLayer(viewer, { radius: 45, colorRamp: WX_RAMP, opacity: 0.55, minVisibleHeight: 150_000 })
-    }
-
-    if (weather.length === 0) {
-      wxHeatmapRef.current.destroy()
-      wxHeatmapRef.current = null
+    if (!wantWeather) {
+      radarDrapeRef.current?.destroy()
+      radarDrapeRef.current = null
+      useStore.getState().setLayerError('weather', null)
       return
     }
 
-    // Map WMO codes to NWS reflectivity scale. Skip clear/cloudy/fog.
-    const normalizeWx = (code: number): number =>
-      code <= 49  ? -1 :      // clear/cloudy/fog — skip
-      code <= 55  ? 0.0 :     // light drizzle — light green
-      code <= 59  ? 0.15 :    // dense drizzle — dark green
-      code <= 63  ? 0.30 :    // moderate rain — yellow
-      code <= 65  ? 0.50 :    // heavy rain — orange
-      code <= 69  ? 0.70 :    // freezing rain — red
-      code <= 79  ? 1.0 :     // snow — blue-white
-      code <= 82  ? 0.30 :    // light showers — yellow
-      code <= 84  ? 0.50 :    // heavy showers — orange
-      code <= 86  ? 1.0 :     // snow showers — blue-white
-      code <= 95  ? 0.70 :    // thunderstorm — red
-      code <= 99  ? 0.85 : -1 // severe thunderstorm w/ hail — magenta
+    let cancelled = false
+    const drape = new TileDrapeLayer(viewer, { opacity: 0.72 })
+    radarDrapeRef.current = drape
 
-    const pts = weather
-      .filter(w => normalizeWx(w.weatherCode) >= 0)
-      .map(w => ({ lat: w.latitude, lon: w.longitude, value: normalizeWx(w.weatherCode) }))
+    const { setLayerLoading, setLayerError } = useStore.getState()
 
-    if (pts.length === 0) {
-      wxHeatmapRef.current.destroy()
-      wxHeatmapRef.current = null
-      return
+    const refresh = async () => {
+      if (cancelled) return
+      try {
+        const frame = await fetchRadarTileTemplate()
+        if (cancelled) return
+        if (!frame) {
+          setLayerError('weather', 'Radar unavailable')
+          return
+        }
+        const ok = await drape.loadMercator(frame.template, 3)
+        if (ok && !cancelled) {
+          setLayerError('weather', null)
+          console.info('[Radar] Frame loaded:', new Date(frame.generated).toISOString())
+        }
+      } catch (err) {
+        console.warn('[Radar] Refresh failed:', err)
+        if (!cancelled) setLayerError('weather', 'Radar fetch failed')
+      } finally {
+        if (!cancelled) setLayerLoading('weather', false)
+      }
     }
 
-    wxHeatmapRef.current.update(pts)
+    setLayerLoading('weather', true)
+    refresh()
+    const interval = setInterval(refresh, 5 * 60_000)
 
-    return () => { wxHeatmapRef.current?.destroy(); wxHeatmapRef.current = null }
-  }, [weather])
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+      drape.destroy()
+      radarDrapeRef.current = null
+    }
+  }, [wantWeather])
 
-  // ── Night Lights toggle (NASA GIBS WMTS) ────────────────────────────────
+  // ── Night Lights (NASA GIBS VIIRS Black Marble) ─────────────────────────
+  // Classification drape — an ImageryLayer would be invisible under the
+  // photorealistic 3D tileset. GIBS epsg4326 tiles mosaic directly.
   const wantNightLights = activeLayers.includes('nightlights')
   useEffect(() => {
     const viewer = viewerRef.current
     if (!viewer || viewer.isDestroyed()) return
 
-    if (wantNightLights && !nightLightsLayerRef.current) {
-      const provider = new UrlTemplateImageryProvider({
-        url: 'https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/VIIRS_Black_Marble/default/2016-01-01/500m/{z}/{y}/{x}.png',
-        minimumLevel: 0,
-        maximumLevel: 8,
-        tilingScheme: new GeographicTilingScheme(),
-        hasAlphaChannel: true,
-        credit: 'NASA GIBS VIIRS Black Marble',
-      })
+    if (!wantNightLights) {
+      nightLightsDrapeRef.current?.destroy()
+      nightLightsDrapeRef.current = null
+      return
+    }
 
-      const layer = new ImageryLayer(provider, {
-        alpha: 0.75,
-      })
-      viewer.imageryLayers.add(layer)
-      nightLightsLayerRef.current = layer
-      viewer.scene.requestRender()
-    } else if (!wantNightLights && nightLightsLayerRef.current) {
-      viewer.imageryLayers.remove(nightLightsLayerRef.current)
-      nightLightsLayerRef.current = null
-      viewer.scene.requestRender()
+    const drape = new TileDrapeLayer(viewer, { opacity: 0.85 })
+    nightLightsDrapeRef.current = drape
+    // Level 3 → 16×8 tiles (4096×2048) — matches drape canvas resolution
+    drape.loadGeographic(
+      'https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/VIIRS_Black_Marble/default/2016-01-01/500m/{z}/{y}/{x}.png',
+      3,
+    )
+
+    return () => {
+      drape.destroy()
+      nightLightsDrapeRef.current = null
     }
   }, [wantNightLights])
 

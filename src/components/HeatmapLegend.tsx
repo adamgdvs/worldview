@@ -23,16 +23,17 @@ const AQ_LEGEND: LegendConfig = {
   ],
 }
 
+// RainViewer radar reflectivity (color scheme 4 — Weather Channel style)
 const WX_LEGEND: LegendConfig = {
-  title: 'PRECIPITATION',
+  title: 'RADAR (dBZ)',
   entries: [
-    { label: 'Light Rain / Drizzle',  color: '#77DD77' },
-    { label: 'Light–Moderate Rain',   color: '#229922' },
-    { label: 'Moderate Rain',         color: '#FFFF33' },
-    { label: 'Heavy Rain',            color: '#FFAA22' },
-    { label: 'Very Heavy / Freezing', color: '#FF3333' },
-    { label: 'Severe Thunderstorm',   color: '#DD44DD' },
-    { label: 'Snow / Ice',            color: '#BBCCFF' },
+    { label: 'Light Rain',       color: '#88EE88' },
+    { label: 'Moderate Rain',    color: '#228B22' },
+    { label: 'Heavy Rain',       color: '#FFD700' },
+    { label: 'Very Heavy',       color: '#FF8C00' },
+    { label: 'Intense / Hail',   color: '#EE2222' },
+    { label: 'Extreme',          color: '#BB44BB' },
+    { label: 'Snow / Mix',       color: '#99BBFF' },
   ],
 }
 

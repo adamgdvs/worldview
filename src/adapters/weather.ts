@@ -1,6 +1,34 @@
-// Open-Meteo API — no API key required
-// https://open-meteo.com/en/docs
-// Fetches current weather for a dense global grid (~350 points, 10°×15° spacing)
+// Weather data sources — no API keys required
+// - RainViewer: global composite precipitation radar tiles (10-min updates)
+// - Open-Meteo: point forecasts (kept for future use; radar drives the layer)
+
+/**
+ * Fetch the latest RainViewer radar frame.
+ * Returns a tile URL template with {z}/{x}/{y} placeholders, or null.
+ * Color scheme 4 (Weather Channel), smoothed, with snow rendering.
+ */
+export async function fetchRadarTileTemplate(): Promise<{ template: string; generated: number } | null> {
+  try {
+    const res = await fetch('https://api.rainviewer.com/public/weather-maps.json', {
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!res.ok) {
+      console.warn(`[Radar] RainViewer index HTTP ${res.status}`)
+      return null
+    }
+    const data = await res.json()
+    const frames = data?.radar?.past ?? []
+    const latest = frames[frames.length - 1]
+    if (!latest?.path) return null
+    return {
+      template: `${data.host}${latest.path}/256/{z}/{x}/{y}/4/1_1.png`,
+      generated: (latest.time ?? 0) * 1000,
+    }
+  } catch (err) {
+    console.warn('[Radar] RainViewer fetch failed:', err)
+    return null
+  }
+}
 
 export interface WeatherPoint {
   id: string

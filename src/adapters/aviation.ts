@@ -34,6 +34,15 @@ export function isMilitaryFlight(f: FlightState): boolean {
   return MIL_PREFIXES.some(p => cs.startsWith(p))
 }
 
+// Normalize an epoch that may be seconds (adsb.fi) or milliseconds
+// (airplanes.live legacy / Date.now fallback) to seconds. Getting this
+// wrong makes every aircraft look hours stale and the staleness filter
+// silently drops the entire feed.
+function epochSeconds(raw: unknown): number {
+  const n = typeof raw === 'number' && isFinite(raw) ? raw : Date.now()
+  return n > 1e12 ? n / 1000 : n
+}
+
 // ── Shared ADSBx-v2-format parser (used by adsb.fi) ────────────────────────
 function parseADSBv2(acArray: any[], now: number): FlightState[] {
   return acArray
@@ -74,10 +83,9 @@ async function fetchAdsbFiPoint(lat: number, lon: number, distNm = 250): Promise
       return []
     }
     const data = await res.json()
-    const now = (data.now ?? Date.now()) / 1000
     const acArray = (data.aircraft ?? data.ac ?? []) as any[]
     console.info(`[adsb.fi] ${acArray.length} aircraft received`)
-    return parseADSBv2(acArray, now)
+    return parseADSBv2(acArray, epochSeconds(data.now))
   } catch (err) {
     console.error('[adsb.fi] Fetch failed:', err)
     return []
@@ -102,9 +110,8 @@ export async function fetchMilitaryFlights(): Promise<FlightState[]> {
         return _milCache?.data ?? []
       }
       const data = await res.json()
-      const now = (data.now ?? Date.now()) / 1000
       const acArray = (data.aircraft ?? data.ac ?? []) as any[]
-      const parsed = parseADSBv2(acArray, now).map(f => ({ ...f, military: true }))
+      const parsed = parseADSBv2(acArray, epochSeconds(data.now)).map(f => ({ ...f, military: true }))
       _milCache = { data: parsed, at: Date.now() }
       return parsed
     } catch (err) {

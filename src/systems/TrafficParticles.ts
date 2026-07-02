@@ -225,6 +225,9 @@ export class TrafficParticleSystem {
         verticalOrigin: VerticalOrigin.CENTER,
         scaleByDistance: new NearFarScalar(500, 1.8, 5e5, 0.4),
         translucencyByDistance: new NearFarScalar(500, 1.0, 3e5, 0.0),
+        // Photorealistic 3D tiles have real elevation — OSM coords at 5m sit
+        // inside the tile geometry and fail the depth test. Draw on top.
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
       })
 
       this.particles.push({ segIdx, pairIdx, t, speed, baseSpeed: speed, billboard, stopped: 0 })

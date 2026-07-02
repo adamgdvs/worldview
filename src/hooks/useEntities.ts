@@ -5,7 +5,6 @@ import { fetchSeismicEvents, type SeismicEvent } from '../adapters/seismic'
 import { fetchWildfires, type WildfireHotspot } from '../adapters/wildfire'
 import { fetchSatellites, propagateAll, propagateAllAtTime, type SatelliteState } from '../adapters/satellites'
 import { fetchAirQuality, type AQStation } from '../adapters/airquality'
-import { fetchWeather, type WeatherPoint } from '../adapters/weather'
 import { fetchGpsJamData, type GpsJamCell } from '../adapters/gpsjam'
 import { fetchRoadNetworkByBbox, type RoadSegment } from '../adapters/traffic'
 import { useStore } from '../store'
@@ -18,7 +17,6 @@ export function useEntities(playbackTimeRef?: MutableRefObject<number>) {
   const [wildfires, setWildfires] = useState<WildfireHotspot[]>([])
   const [sats, setSats] = useState<SatelliteState[]>([])
   const [airQuality, setAirQuality] = useState<AQStation[]>([])
-  const [weather, setWeather] = useState<WeatherPoint[]>([])
   const [gpsJam, setGpsJam] = useState<GpsJamCell[]>([])
   const [roadSegments, setRoadSegments] = useState<RoadSegment[]>([])
   const { activeLayers } = useStore()
@@ -32,7 +30,6 @@ export function useEntities(playbackTimeRef?: MutableRefObject<number>) {
   const fireCache    = useRef<WildfireHotspot[]>([])
   const satCache     = useRef<SatelliteState[]>([])
   const aqCache      = useRef<AQStation[]>([])
-  const weatherCache = useRef<WeatherPoint[]>([])
   const gpsJamCache  = useRef<GpsJamCell[]>([])
 
   const { setLayerLoading, setLayerError } = useStore.getState()
@@ -45,7 +42,6 @@ export function useEntities(playbackTimeRef?: MutableRefObject<number>) {
   const wantFires    = activeLayers.includes('fires')
   const wantSats     = activeLayers.includes('satellites')
   const wantAirQ     = activeLayers.includes('airq')
-  const wantWeather  = activeLayers.includes('weather')
   const wantGpsJam   = activeLayers.includes('gpsjam')
   const wantTraffic  = activeLayers.includes('traffic')
 
@@ -507,45 +503,6 @@ export function useEntities(playbackTimeRef?: MutableRefObject<number>) {
     return () => clearInterval(interval)
   }, [wantAirQ, playbackMode])
 
-  // ── Weather (Open-Meteo) — refresh every 15 minutes ─────────────────────
-  useEffect(() => {
-    if (!wantWeather) {
-      setWeather([])
-      setLayerError('weather', null)
-      return
-    }
-
-    if (playbackMode) {
-      playbackFetchOnce(wantWeather, weatherCache, setWeather, fetchWeather, 'weather')
-      return
-    }
-
-    if (weatherCache.current.length > 0) setWeather(weatherCache.current)
-    else setLayerLoading('weather', true)
-
-    const poll = async () => {
-      if (useStore.getState().playbackMode) return
-      try {
-        const points = await fetchWeather()
-        if (points.length) {
-          weatherCache.current = points
-          setWeather(points)
-          setLayerError('weather', null)
-        } else if (weatherCache.current.length === 0) {
-          setLayerError('weather', 'No data received')
-        }
-      } catch (err) {
-        console.error('[Weather] Fetch failed:', err)
-        setLayerError('weather', 'Fetch failed')
-      } finally {
-        setLayerLoading('weather', false)
-      }
-    }
-
-    poll()
-    const interval = setInterval(poll, 15 * 60_000)
-    return () => clearInterval(interval)
-  }, [wantWeather, playbackMode])
 
   // ── GPS Jamming (gpsjam.org) — refresh every 6 hours (daily data) ────────
   useEffect(() => {
@@ -616,5 +573,5 @@ export function useEntities(playbackTimeRef?: MutableRefObject<number>) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wantTraffic, cameraBbox?.[0], cameraBbox?.[1], cameraBbox?.[2], cameraBbox?.[3], cameraHeight > 80_000])
 
-  return { flights, militaryFlights, vessels, seismicEvents, wildfires, sats, airQuality, weather, gpsJam, roadSegments }
+  return { flights, militaryFlights, vessels, seismicEvents, wildfires, sats, airQuality, gpsJam, roadSegments }
 }
