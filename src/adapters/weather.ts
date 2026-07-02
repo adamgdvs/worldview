@@ -21,7 +21,8 @@ export async function fetchRadarTileTemplate(): Promise<{ template: string; gene
     const latest = frames[frames.length - 1]
     if (!latest?.path) return null
     return {
-      template: `${data.host}${latest.path}/256/{z}/{x}/{y}/4/1_1.png`,
+      // 512px tiles — double the resolution per request vs 256
+      template: `${data.host}${latest.path}/512/{z}/{x}/{y}/4/1_1.png`,
       generated: (latest.time ?? 0) * 1000,
     }
   } catch (err) {

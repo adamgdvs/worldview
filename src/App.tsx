@@ -2475,8 +2475,10 @@ function App() {
           setLayerError('weather', 'Radar unavailable')
           return
         }
-        const ok = await drape.loadMercator(frame.template, 3)
+        const ok = await drape.loadMercator(frame.template, 3, 512)
         if (ok && !cancelled) {
+          // Sharp overlay of the visible area (re-mosaics on camera moveEnd)
+          drape.enableMercatorRefine(frame.template, 512)
           setLayerError('weather', null)
           console.info('[Radar] Frame loaded:', new Date(frame.generated).toISOString())
         }

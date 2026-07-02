@@ -148,13 +148,17 @@ export function useEntities(playbackTimeRef?: MutableRefObject<number>) {
         // rate-limit credits than global and lets the adsb.fi point-query
         // fallback engage when OpenSky is rate-limited.
         const st = useStore.getState()
-        const regional = st.cameraBbox && st.cameraHeight < 4_000_000
+        // Use the viewport bbox whenever the camera sees a bounded region —
+        // even continental views — so the fallback sweep covers what's on
+        // screen instead of a few fixed world hubs. Margin grows with altitude.
+        const regional = !!st.cameraBbox && st.cameraHeight < 15_000_000
+        const margin = st.cameraHeight < 4_000_000 ? 1 : 3
         const bbox = regional
           ? {
-              minLat: Math.max(st.cameraBbox![0] - 1, -90),
-              minLon: Math.max(st.cameraBbox![1] - 1, -180),
-              maxLat: Math.min(st.cameraBbox![2] + 1, 90),
-              maxLon: Math.min(st.cameraBbox![3] + 1, 180),
+              minLat: Math.max(st.cameraBbox![0] - margin, -90),
+              minLon: Math.max(st.cameraBbox![1] - margin, -180),
+              maxLat: Math.min(st.cameraBbox![2] + margin, 90),
+              maxLon: Math.min(st.cameraBbox![3] + margin, 180),
             }
           : { minLat: -90, maxLat: 90, minLon: -180, maxLon: 180 }
         // Military gets a dedicated global feed (adsb.fi /v2/mil); civil keeps OpenSky.

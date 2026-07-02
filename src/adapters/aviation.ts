@@ -143,40 +143,45 @@ async function fetchAdsbPoint(lat: number, lon: number, distNm = 250): Promise<F
   return []
 }
 
-// ── Global fallback sweep — point queries over the world's traffic hubs ─────
-// A 250 nm point query only covers ~460 km, so a "global" view is stitched
-// from hub queries spread round-robin across providers (respecting per-
-// provider serialization). Coarse but keeps the layer alive when OpenSky
-// is down or rate-limited.
+// ── Fallback sweep — point queries stitched into area coverage ──────────────
+// A 250 nm point query only covers ~460 km, so wider views are stitched from
+// multiple queries spread round-robin across providers (respecting per-
+// provider serialization). Keeps the layer alive when OpenSky is down.
+// Full-globe views sample the world's traffic hubs; continental views get a
+// uniform grid over the camera bbox so coverage isn't just hub circles.
 const WORLD_HUBS: [number, number][] = [
-  [40.7, -74.0],   // US East (NYC)
-  [41.9, -87.6],   // US Central (Chicago)
-  [34.0, -118.2],  // US West (LA)
-  [29.8, -95.4],   // US South (Houston)
-  [51.5, -0.1],    // UK/W. Europe (London)
-  [48.9, 8.2],     // Central Europe (Frankfurt/Stuttgart)
-  [41.0, 28.9],    // E. Med (Istanbul)
-  [25.3, 55.4],    // Gulf (Dubai)
-  [28.6, 77.2],    // South Asia (Delhi)
-  [31.2, 121.5],   // China (Shanghai)
-  [35.7, 139.7],   // Japan (Tokyo)
-  [1.35, 103.99],  // SE Asia (Singapore)
-  [-23.5, -46.6],  // South America (São Paulo)
-  [-33.9, 151.2],  // Australia (Sydney)
+  // North America
+  [40.7, -74.0], [42.4, -83.0], [41.9, -87.6], [33.7, -84.4], [32.9, -97.0],
+  [29.8, -95.4], [39.8, -104.9], [34.0, -118.2], [37.6, -122.4], [47.4, -122.3],
+  [43.7, -79.6], [25.8, -80.3], [19.4, -99.1],
+  // South America
+  [-23.5, -46.6], [4.7, -74.1], [-34.6, -58.4], [-12.0, -77.1],
+  // Europe
+  [51.5, -0.1], [48.9, 2.5], [50.0, 8.6], [40.5, -3.6], [41.8, 12.6],
+  [52.3, 4.8], [59.7, 18.0], [55.6, 37.3], [41.0, 28.9], [37.9, 23.9],
+  // Africa / Middle East
+  [30.1, 31.4], [-26.1, 28.2], [6.6, 3.3], [25.3, 55.4], [24.9, 46.7], [32.0, 34.9],
+  // Asia
+  [28.6, 77.2], [19.1, 72.9], [13.7, 100.8], [1.35, 103.99], [-6.1, 106.7],
+  [22.3, 114.2], [31.2, 121.5], [40.1, 116.6], [37.5, 126.4], [35.7, 139.7],
+  [14.5, 121.0], [23.6, 58.3],
+  // Oceania
+  [-33.9, 151.2], [-37.7, 144.8], [-27.4, 153.1],
 ]
 
-let _sweepCache: { data: FlightState[]; at: number } | null = null
+const SWEEP_CAP = 24  // ≈8 serialized queries per provider ≈ 9 s per sweep
 
-async function fetchGlobalSweep(): Promise<FlightState[]> {
-  if (_sweepCache && Date.now() - _sweepCache.at < 25_000) return _sweepCache.data
+let _sweepCache: { key: string; data: FlightState[]; at: number } | null = null
 
-  // Distribute hubs across providers; each provider works its share serially
+// Run point queries round-robin across providers (serialized within each),
+// merging by icao24.
+async function sweepPoints(points: [number, number][]): Promise<FlightState[]> {
   const shares: [AdsbProvider, [number, number][]][] = ADSB_PROVIDERS.map((p, i) =>
-    [p, WORLD_HUBS.filter((_, h) => h % ADSB_PROVIDERS.length === i)])
+    [p, points.filter((_, h) => h % ADSB_PROVIDERS.length === i)])
 
-  const results = await Promise.all(shares.map(async ([p, hubs]) => {
+  const results = await Promise.all(shares.map(async ([p, pts]) => {
     const out: FlightState[] = []
-    for (const [lat, lon] of hubs) {
+    for (const [lat, lon] of pts) {
       const r = await providerFetch(p, p.pointUrl(lat, lon, 250))
       if (r) out.push(...r)
     }
@@ -185,9 +190,50 @@ async function fetchGlobalSweep(): Promise<FlightState[]> {
 
   const merged = new Map<string, FlightState>()
   for (const batch of results) for (const f of batch) merged.set(f.icao24, f)
-  const data = [...merged.values()]
-  console.info(`[Aviation] Global sweep: ${data.length} aircraft from ${WORLD_HUBS.length} hubs`)
-  if (data.length) _sweepCache = { data, at: Date.now() }
+  return [...merged.values()]
+}
+
+async function fetchSweep(
+  bbox: { minLat: number; maxLat: number; minLon: number; maxLon: number }
+): Promise<FlightState[]> {
+  const latSpan = bbox.maxLat - bbox.minLat
+  const lonSpan = bbox.maxLon - bbox.minLon
+  const isGlobal = latSpan > 100 || lonSpan > 220
+
+  let points: [number, number][]
+  if (isGlobal) {
+    points = WORLD_HUBS.filter((_, i) =>
+      i % Math.ceil(WORLD_HUBS.length / SWEEP_CAP) === 0 || WORLD_HUBS.length <= SWEEP_CAP)
+  } else {
+    // Uniform grid over the viewport. 250 nm radius ≈ 8.3° diameter at the
+    // equator, so ~6.5° spacing overlaps; widen spacing if the cap forces it.
+    const midLat = (bbox.minLat + bbox.maxLat) / 2
+    const lonScale = Math.max(0.3, Math.cos(midLat * Math.PI / 180))
+    let latStep = 6.5
+    let lonStep = 6.5 / lonScale
+    const count = () => (Math.ceil(latSpan / latStep)) * (Math.ceil(lonSpan / lonStep))
+    while (count() > SWEEP_CAP) { latStep *= 1.3; lonStep *= 1.3 }
+    points = []
+    for (let la = bbox.minLat + latStep / 2; la < bbox.maxLat; la += latStep) {
+      for (let lo = bbox.minLon + lonStep / 2; lo < bbox.maxLon; lo += lonStep) {
+        points.push([Math.max(-85, Math.min(85, la)), lo])
+      }
+    }
+    // Hubs inside the view are better samples than empty ocean — front-load them
+    const inView = WORLD_HUBS.filter(([la, lo]) =>
+      la >= bbox.minLat && la <= bbox.maxLat && lo >= bbox.minLon && lo <= bbox.maxLon)
+    points = [...inView, ...points].slice(0, SWEEP_CAP)
+  }
+
+  const key = isGlobal ? 'global'
+    : `${bbox.minLat.toFixed(0)},${bbox.minLon.toFixed(0)},${bbox.maxLat.toFixed(0)},${bbox.maxLon.toFixed(0)}`
+  if (_sweepCache && _sweepCache.key === key && Date.now() - _sweepCache.at < 25_000) {
+    return _sweepCache.data
+  }
+
+  const data = await sweepPoints(points)
+  console.info(`[Aviation] Sweep (${key}): ${data.length} aircraft from ${points.length} points`)
+  if (data.length) _sweepCache = { key, data, at: Date.now() }
   return data
 }
 
@@ -358,16 +404,16 @@ async function fetchFlightsUncached(
   const results = await fetchOpenSkyFlights(bbox)
   if (results.length > 0) return results
 
-  // Global view: stitch a world snapshot from hub point-queries across the
-  // free ADSBx-v2 providers (adsb.lol / airplanes.live / adsb.fi).
-  if (bbox.maxLat - bbox.minLat > 90) {
-    console.warn('[Aviation] OpenSky returned empty — running global hub sweep...')
-    return fetchGlobalSweep()
+  // Small view → single point query; anything wider → stitched sweep of the
+  // visible area across the free ADSBx-v2 providers.
+  const latSpan = bbox.maxLat - bbox.minLat
+  const lonSpan = bbox.maxLon - bbox.minLon
+  if (latSpan <= 7 && lonSpan <= 7) {
+    console.warn('[Aviation] OpenSky returned empty — trying point providers...')
+    return fetchAdsbPoint((bbox.minLat + bbox.maxLat) / 2, (bbox.minLon + bbox.maxLon) / 2)
   }
-  console.warn('[Aviation] OpenSky returned empty — trying point providers...')
-  const cLat = (bbox.minLat + bbox.maxLat) / 2
-  const cLon = (bbox.minLon + bbox.maxLon) / 2
-  return fetchAdsbPoint(cLat, cLon)
+  console.warn('[Aviation] OpenSky returned empty — sweeping visible area...')
+  return fetchSweep(bbox)
 }
 
 /**
