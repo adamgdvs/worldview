@@ -17,13 +17,15 @@ export class AISAdapter {
   private socket: WebSocket | null = null;
   private apiKey: string;
   private onMessage: (vessel: VesselState) => void;
+  private onError: ((error: string | null) => void) | null = null;
   private intentionalDisconnect = false;
   private reconnectDelay = 5_000;
   private msgCount = 0;
 
-  constructor(apiKey: string, onMessage: (vessel: VesselState) => void) {
+  constructor(apiKey: string, onMessage: (vessel: VesselState) => void, onError?: (error: string | null) => void) {
     this.apiKey = apiKey;
     this.onMessage = onMessage;
+    this.onError = onError ?? null;
   }
 
   connect() {
@@ -43,6 +45,7 @@ export class AISAdapter {
     this.socket.onopen = () => {
       console.log('[AIS] Connected, sending subscription');
       this.reconnectDelay = 5_000;
+      this.onError?.(null);
       const subscription = {
         Apikey: this.apiKey,
         BoundingBoxes: [[[-90, -180], [90, 180]]],
@@ -96,14 +99,16 @@ export class AISAdapter {
       console.log(`[AIS] Disconnected (code: ${event.code}, reason: ${event.reason || 'none'})`);
       this.socket = null;
       if (!this.intentionalDisconnect) {
+        this.onError?.('Reconnecting...');
         console.log(`[AIS] Reconnecting in ${this.reconnectDelay / 1000}s...`);
         setTimeout(() => this.connect(), this.reconnectDelay);
         this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30_000); // cap at 30s
       }
     };
 
-    this.socket.onerror = (error) => {
-      console.error('AISStream error:', error);
+    this.socket.onerror = () => {
+      console.error('[AIS] WebSocket error');
+      this.onError?.('Connection error');
     };
   }
 

@@ -1,4 +1,5 @@
-// Aviation data: airplanes.live (primary) → OpenSky OAuth2 (fallback)
+// Aviation data: OpenSky (primary, global) → adsb.fi (fallback, regional)
+// Military layer supplement: adsb.fi /v2/mil (global military aircraft)
 
 export interface FlightState {
   icao24: string
@@ -21,7 +22,19 @@ export interface FlightState {
   military: boolean
 }
 
-// ── Shared ADSBx-v2-format parser (used by airplanes.live) ─────────────────
+// ── Military classification helper ─────────────────────────────────────────
+const MIL_PREFIXES = ['RCH', 'EVAC', 'SAM', 'DOOM', 'TOPCAT', 'EPIC', 'JAKE', 'IRON', 'BISON',
+  'BDOG', 'HAVOC', 'BOXER', 'DUKE', 'KING', 'NAVY', 'SPAR', 'REACH', 'FORTE', 'RRR']
+
+export function isMilitaryFlight(f: FlightState): boolean {
+  if (f.military) return true
+  const sq = parseInt(f.squawk ?? '', 10)
+  if (!isNaN(sq) && sq >= 5000 && sq <= 5777) return true
+  const cs = (f.callsign ?? '').toUpperCase()
+  return MIL_PREFIXES.some(p => cs.startsWith(p))
+}
+
+// ── Shared ADSBx-v2-format parser (used by adsb.fi) ────────────────────────
 function parseADSBv2(acArray: any[], now: number): FlightState[] {
   return acArray
     .map((a): FlightState => ({
@@ -48,30 +61,65 @@ function parseADSBv2(acArray: any[], now: number): FlightState[] {
     .filter(f => f.icao24 && f.latitude !== null && f.longitude !== null)
 }
 
-// ── airplanes.live — free, CORS-enabled, global coverage ────────────────────
-// API: https://api.airplanes.live/v2/point/{lat}/{lon}/{radius_nm}
-// Returns ADSBx-v2 format, ~7000 aircraft globally with radius=25000
-async function fetchAirplanesLive(): Promise<FlightState[]> {
+// ── adsb.fi opendata — free, proxied via /adsbfi to avoid CORS ──────────────
+// API: /api/v2/lat/{lat}/lon/{lon}/dist/{radius_nm}  (max radius 250 nm)
+// Response: { now, aircraft: [...], resultCount } in ADSBx-v2 format
+async function fetchAdsbFiPoint(lat: number, lon: number, distNm = 250): Promise<FlightState[]> {
   try {
-    const res = await fetch('https://api.airplanes.live/v2/point/20/0/25000', {
+    const res = await fetch(`/adsbfi/api/v2/lat/${lat.toFixed(3)}/lon/${lon.toFixed(3)}/dist/${distNm}`, {
       signal: AbortSignal.timeout(20_000),
     })
     if (!res.ok) {
-      console.warn(`[airplanes.live] HTTP ${res.status}`)
+      console.warn(`[adsb.fi] HTTP ${res.status}`)
       return []
     }
     const data = await res.json()
     const now = (data.now ?? Date.now()) / 1000
-    const acArray = (data.ac ?? []) as any[]
-    console.info(`[airplanes.live] ${acArray.length} aircraft received`)
+    const acArray = (data.aircraft ?? data.ac ?? []) as any[]
+    console.info(`[adsb.fi] ${acArray.length} aircraft received`)
     return parseADSBv2(acArray, now)
   } catch (err) {
-    console.error('[airplanes.live] Fetch failed:', err)
+    console.error('[adsb.fi] Fetch failed:', err)
     return []
   }
 }
 
+// ── adsb.fi military feed — all aircraft flagged military, global ───────────
+// adsb.fi rate-limits aggressively (1 req/s); dedupe concurrent calls and
+// cache briefly so StrictMode double-effects don't trigger 429s.
+let _milInFlight: Promise<FlightState[]> | null = null
+let _milCache: { data: FlightState[]; at: number } | null = null
+
+export async function fetchMilitaryFlights(): Promise<FlightState[]> {
+  if (_milCache && Date.now() - _milCache.at < 15_000) return _milCache.data
+  if (_milInFlight) return _milInFlight
+
+  _milInFlight = (async () => {
+    try {
+      const res = await fetch('/adsbfi/api/v2/mil', { signal: AbortSignal.timeout(20_000) })
+      if (!res.ok) {
+        console.warn(`[adsb.fi mil] HTTP ${res.status}`)
+        return _milCache?.data ?? []
+      }
+      const data = await res.json()
+      const now = (data.now ?? Date.now()) / 1000
+      const acArray = (data.aircraft ?? data.ac ?? []) as any[]
+      const parsed = parseADSBv2(acArray, now).map(f => ({ ...f, military: true }))
+      _milCache = { data: parsed, at: Date.now() }
+      return parsed
+    } catch (err) {
+      console.error('[adsb.fi mil] Fetch failed:', err)
+      return _milCache?.data ?? []
+    } finally {
+      _milInFlight = null
+    }
+  })()
+  return _milInFlight
+}
+
 // ── OpenSky OAuth2 token cache ─────────────────────────────────────────────────
+// Credentials are handled SERVER-SIDE (Vite proxy in dev, Vercel edge in prod).
+// The client just calls /opensky-token with no credentials.
 let _tokenCache: { token: string; expiresAt: number } | null = null
 
 async function getOpenSkyToken(): Promise<string | null> {
@@ -79,23 +127,11 @@ async function getOpenSkyToken(): Promise<string | null> {
     return _tokenCache.token
   }
 
-  const clientId     = import.meta.env.VITE_OPENSKY_CLIENT_ID
-  const clientSecret = import.meta.env.VITE_OPENSKY_CLIENT_SECRET
-  if (!clientId || !clientSecret || clientId.includes('your_')) return null
-
-  const tokenUrl = import.meta.env.DEV
-    ? '/opensky-token'
-    : 'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token'
+  const tokenUrl = '/opensky-token'
 
   try {
     const res = await fetch(tokenUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: clientId,
-        client_secret: clientSecret,
-      }),
       signal: AbortSignal.timeout(10_000),
     })
     if (!res.ok) {
@@ -119,9 +155,7 @@ async function fetchOpenSkyFlights(
   const { minLat, maxLat, minLon, maxLon } = bbox
 
   const qs = `lamin=${minLat}&lomin=${minLon}&lamax=${maxLat}&lomax=${maxLon}`
-  const url = import.meta.env.DEV
-    ? `/opensky/api/states/all?${qs}`
-    : `https://opensky-network.org/api/states/all?${qs}`
+  const url = `/opensky/api/states/all?${qs}`
 
   const token = await getOpenSkyToken()
   const fetchOptions: RequestInit = token
@@ -179,17 +213,41 @@ async function fetchOpenSkyFlights(
   }
 }
 
-// ── Primary fetch: airplanes.live first, OpenSky fallback ───────────────────
+// ── Primary fetch: OpenSky (global), adsb.fi point-query fallback ───────────
+// Dedupe concurrent calls + short TTL cache — StrictMode double-effects and
+// rapid layer toggles otherwise burn OpenSky's anonymous daily quota.
+let _flightsInFlight: Promise<FlightState[]> | null = null
+let _flightsCache: { data: FlightState[]; at: number } | null = null
+
 export async function fetchFlights(
   bbox: { minLat: number; maxLat: number; minLon: number; maxLon: number }
 ): Promise<FlightState[]> {
-  // airplanes.live is free, CORS-enabled, and covers global aircraft
-  const results = await fetchAirplanesLive()
+  if (_flightsCache && Date.now() - _flightsCache.at < 10_000) return _flightsCache.data
+  if (_flightsInFlight) return _flightsInFlight
+  _flightsInFlight = fetchFlightsUncached(bbox).then(data => {
+    if (data.length) _flightsCache = { data, at: Date.now() }
+    return data
+  }).finally(() => { _flightsInFlight = null })
+  return _flightsInFlight
+}
+
+async function fetchFlightsUncached(
+  bbox: { minLat: number; maxLat: number; minLon: number; maxLon: number }
+): Promise<FlightState[]> {
+  // OpenSky /states/all is the only free global snapshot (anonymous OK, OAuth2 raises limits)
+  const results = await fetchOpenSkyFlights(bbox)
   if (results.length > 0) return results
 
-  // Fall back to OpenSky with OAuth2
-  console.warn('[Aviation] airplanes.live returned empty, trying OpenSky...')
-  return fetchOpenSkyFlights(bbox)
+  // Fall back to adsb.fi centered on the requested bbox (250 nm best-effort).
+  // Pointless for a global bbox — the centre would be (0,0) in the Atlantic.
+  if (bbox.maxLat - bbox.minLat > 90) {
+    console.warn('[Aviation] OpenSky returned empty; no regional bbox for adsb.fi fallback')
+    return []
+  }
+  console.warn('[Aviation] OpenSky returned empty, trying adsb.fi...')
+  const cLat = (bbox.minLat + bbox.maxLat) / 2
+  const cLon = (bbox.minLon + bbox.maxLon) / 2
+  return fetchAdsbFiPoint(cLat, cLon)
 }
 
 /**
@@ -198,9 +256,7 @@ export async function fetchFlights(
  */
 export async function fetchFlightsAtTime(unixSeconds: number): Promise<FlightState[]> {
   const qs = `lamin=-90&lomin=-180&lamax=90&lomax=180&time=${Math.floor(unixSeconds)}`
-  const url = import.meta.env.DEV
-    ? `/opensky/api/states/all?${qs}`
-    : `https://opensky-network.org/api/states/all?${qs}`
+  const url = `/opensky/api/states/all?${qs}`
 
   const token = await getOpenSkyToken()
   const fetchOptions: RequestInit = token

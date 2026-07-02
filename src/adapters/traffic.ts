@@ -18,6 +18,12 @@ const MIN_FETCH_INTERVAL = 15_000  // minimum 15s between Overpass requests
 const MAX_RETRIES = 2
 const RETRY_DELAY = 5_000 // 5s between retries
 
+// Overpass API servers — try alternate on failure/timeout
+const OVERPASS_SERVERS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://z.overpass-api.de/api/interpreter',
+]
+
 let lastFetchTime = 0
 let lastFetchedSegments: RoadSegment[] = []  // keep last successful result as fallback
 
@@ -75,23 +81,33 @@ export async function fetchRoadNetworkByBbox(
   bbox: [number, number, number, number],
   label?: string,
 ): Promise<RoadSegment[]> {
-  // Clamp bbox size to avoid huge Overpass queries
-  const [s, w, n, e] = bbox
-  const latSpan = n - s
-  const lonSpan = e - w
-  if (latSpan > 0.5 || lonSpan > 0.5) {
-    console.info(`[Traffic] Bbox too large (${latSpan.toFixed(2)}°×${lonSpan.toFixed(2)}°), skipping Overpass`)
-    return []
+  // Clamp bbox size to avoid huge Overpass queries — cap to center 0.8°
+  let [s, w, n, e] = bbox
+  let latSpan = n - s
+  let lonSpan = e - w
+
+  const MAX_SPAN = 0.8
+  if (latSpan > MAX_SPAN) {
+    const mid = (s + n) / 2
+    s = mid - MAX_SPAN / 2; n = mid + MAX_SPAN / 2
+    latSpan = MAX_SPAN
   }
+  if (lonSpan > MAX_SPAN) {
+    const mid = (w + e) / 2
+    w = mid - MAX_SPAN / 2; e = mid + MAX_SPAN / 2
+    lonSpan = MAX_SPAN
+  }
+
+  console.debug(`[Traffic] Query bbox: ${s.toFixed(4)},${w.toFixed(4)},${n.toFixed(4)},${e.toFixed(4)} (${latSpan.toFixed(2)}°×${lonSpan.toFixed(2)}°)`)
 
   // Round bbox to 2 decimal places for cache key stability
   const cacheKey = `worldview-roads-${s.toFixed(2)},${w.toFixed(2)},${n.toFixed(2)},${e.toFixed(2)}`
 
-  // Check IndexedDB cache
+  // Check IndexedDB cache (skip empty cached results)
   try {
     const cached = await get<CacheEntry>(cacheKey)
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-      console.info(`[Traffic] Cache hit for ${label ?? 'bbox'} (${cached.segments.length} segments)`)
+    if (cached && cached.segments.length > 0 && Date.now() - cached.timestamp < CACHE_TTL) {
+      console.debug(`[Traffic] Cache hit for ${label ?? 'bbox'} (${cached.segments.length} segments)`)
       lastFetchedSegments = cached.segments
       return cached.segments
     }
@@ -100,59 +116,62 @@ export async function fetchRoadNetworkByBbox(
   // Throttle: don't hammer Overpass — return last result if too soon
   const now = Date.now()
   if (now - lastFetchTime < MIN_FETCH_INTERVAL) {
-    console.info(`[Traffic] Throttled — returning ${lastFetchedSegments.length} cached segments`)
+    console.debug(`[Traffic] Throttled — returning ${lastFetchedSegments.length} cached segments`)
     return lastFetchedSegments
   }
 
-  const query = buildOverpassQuery(bbox)
+  const query = buildOverpassQuery([s, w, n, e])
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      if (attempt > 0) {
-        console.info(`[Traffic] Retry ${attempt}/${MAX_RETRIES} after delay...`)
-        await new Promise(r => setTimeout(r, RETRY_DELAY * attempt))
-      }
-
-      console.info(`[Traffic] Fetching road network for ${label ?? 'bbox'}...`)
-      lastFetchTime = Date.now()
-      const res = await fetch('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        body: `data=${encodeURIComponent(query)}`,
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      })
-
-      if (res.status === 429) {
-        console.warn(`[Traffic] Overpass returned 429 (rate limited)`)
-        if (attempt < MAX_RETRIES) continue
-        // Exhausted retries — return last known good data
-        console.info(`[Traffic] Using ${lastFetchedSegments.length} previously fetched segments`)
-        return lastFetchedSegments
-      }
-
-      if (!res.ok) {
-        console.warn(`[Traffic] Overpass returned ${res.status}`)
-        return lastFetchedSegments.length > 0 ? lastFetchedSegments : []
-      }
-
-      const data = await res.json()
-      const segments = parseOverpassResponse(data)
-      console.info(`[Traffic] Got ${segments.length} road segments for ${label ?? 'bbox'}`)
-
-      lastFetchedSegments = segments
-
-      // Cache in IndexedDB
+  // Try each Overpass mirror in order
+  for (let si = 0; si < OVERPASS_SERVERS.length; si++) {
+    const server = OVERPASS_SERVERS[si]
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        await set(cacheKey, { segments, timestamp: Date.now() } as CacheEntry)
-      } catch { /* cache write failure, non-critical */ }
+        if (attempt > 0) {
+          await new Promise(r => setTimeout(r, RETRY_DELAY * attempt))
+        }
 
-      return segments
-    } catch (err) {
-      console.error('[Traffic] Overpass fetch failed:', err)
-      if (attempt >= MAX_RETRIES) {
-        return lastFetchedSegments.length > 0 ? lastFetchedSegments : []
+        console.debug(`[Traffic] Fetching road network for ${label ?? 'bbox'} (server ${si + 1}/${OVERPASS_SERVERS.length})...`)
+        lastFetchTime = Date.now()
+        const res = await fetch(server, {
+          method: 'POST',
+          body: `data=${encodeURIComponent(query)}`,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          signal: AbortSignal.timeout(25_000),
+        })
+
+        if (res.status === 429 || res.status === 504 || res.status === 503) {
+          console.warn(`[Traffic] Overpass returned ${res.status}`)
+          if (attempt < MAX_RETRIES) continue
+          break // try next server
+        }
+
+        if (!res.ok) {
+          console.warn(`[Traffic] Overpass returned ${res.status}`)
+          break // try next server
+        }
+
+        const data = await res.json()
+        const segments = parseOverpassResponse(data)
+        console.debug(`[Traffic] Got ${segments.length} road segments for ${label ?? 'bbox'}`)
+
+        lastFetchedSegments = segments
+
+        // Cache in IndexedDB (only cache non-empty results)
+        if (segments.length > 0) {
+          try {
+            await set(cacheKey, { segments, timestamp: Date.now() } as CacheEntry)
+          } catch { /* cache write failure, non-critical */ }
+        }
+
+        return segments
+      } catch (err) {
+        console.warn(`[Traffic] Overpass server ${si + 1} failed:`, (err as Error).message)
+        if (attempt >= MAX_RETRIES) break // try next server
       }
     }
   }
 
+  console.warn(`[Traffic] All Overpass servers exhausted, returning ${lastFetchedSegments.length} cached segments`)
   return lastFetchedSegments
 }

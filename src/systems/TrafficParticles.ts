@@ -70,6 +70,7 @@ export class TrafficParticleSystem {
   private sampler: TrafficDataSampler | null = null
   private frameCount = 0
   private squareIcon: string
+  private currentSegmentIds: Set<string> = new Set()
 
   // Endpoint index for segment connectivity
   private endpointIndex: Map<string, number[]> = new Map()
@@ -84,6 +85,17 @@ export class TrafficParticleSystem {
   }
 
   setRoadNetwork(rawSegments: RoadSegment[]) {
+    // Skip rebuild if the road network hasn't changed
+    const newIds = new Set(rawSegments.map(s => s.id))
+    if (newIds.size === this.currentSegmentIds.size && rawSegments.length > 0) {
+      let same = true
+      for (const id of newIds) {
+        if (!this.currentSegmentIds.has(id)) { same = false; break }
+      }
+      if (same) return // identical road network — keep particles running
+    }
+    this.currentSegmentIds = newIds
+
     this.collection.removeAll()
     this.particles = []
     this.segments = []

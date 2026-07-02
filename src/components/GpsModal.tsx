@@ -51,7 +51,7 @@ export function GpsModal({ onNavigate }: GpsModalProps) {
 
       {/* Modal */}
       <div className="relative glass-panel w-96 p-4">
-        <div className="text-[9px] text-[#5a7a9a] font-bold tracking-[2px] uppercase mb-3">
+        <div className="text-[9px] text-[#666666] font-bold tracking-[2px] uppercase mb-3">
           GPS COORDINATE JUMP
         </div>
 
@@ -62,7 +62,7 @@ export function GpsModal({ onNavigate }: GpsModalProps) {
             value={input}
             onChange={(e) => { setInput(e.target.value); setError('') }}
             placeholder="lat, lon  (e.g. 38.9072, -77.0369)"
-            className="w-full bg-[#0a1628] border border-worldview-border text-worldview-text-bright text-[11px] font-mono px-3 py-2 placeholder:text-[#304c78] focus:border-worldview-cyan/50 focus:outline-none transition-colors"
+            className="w-full bg-[#111111] border border-worldview-border text-worldview-text-bright text-[11px] font-mono px-3 py-2 placeholder:text-[#333333] focus:border-worldview-cyan/50 focus:outline-none transition-colors"
           />
 
           {error && (
@@ -70,14 +70,14 @@ export function GpsModal({ onNavigate }: GpsModalProps) {
           )}
 
           <div className="flex items-center justify-between mt-3">
-            <div className="text-[8px] text-[#304c78] font-mono">
+            <div className="text-[8px] text-[#333333] font-mono">
               Formats: 38.9, -77.0 | 38.9, -77.0, 1500
             </div>
             <div className="flex gap-2">
               <button
                 type="button"
                 onClick={() => setOpen(false)}
-                className="px-3 py-1.5 text-[9px] font-bold tracking-wider text-[#5a7a9a] border border-worldview-border hover:text-worldview-text-bright hover:border-worldview-text-bright transition-colors"
+                className="px-3 py-1.5 text-[9px] font-bold tracking-wider text-[#666666] border border-worldview-border hover:text-worldview-text-bright hover:border-worldview-text-bright transition-colors"
               >
                 CANCEL
               </button>
@@ -92,8 +92,8 @@ export function GpsModal({ onNavigate }: GpsModalProps) {
         </form>
 
         <div className="mt-3 pt-2 border-t border-worldview-border/30">
-          <div className="text-[8px] text-[#304c78] font-mono tracking-wider">
-            SHORTCUT: <span className="text-[#5a7a9a]">G</span> to open/close
+          <div className="text-[8px] text-[#333333] font-mono tracking-wider">
+            SHORTCUT: <span className="text-[#666666]">G</span> to open/close
           </div>
         </div>
       </div>

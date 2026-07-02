@@ -11,7 +11,7 @@ export function LivePlaybackToggle() {
         className={`px-3 py-1 text-[9px] font-bold tracking-[2px] font-mono border border-worldview-border/30 rounded-l transition-colors ${
           !playbackMode
             ? 'bg-[#00f0ff]/20 text-[#00f0ff] border-[#00f0ff]/40'
-            : 'bg-[#0a1628]/80 text-[#4a6385] hover:text-[#5a7a9a]'
+            : 'bg-[#111111]/80 text-[#555555] hover:text-[#666666]'
         }`}
       >
         LIVE
@@ -21,7 +21,7 @@ export function LivePlaybackToggle() {
         className={`px-3 py-1 text-[9px] font-bold tracking-[2px] font-mono border border-worldview-border/30 border-l-0 rounded-r transition-colors ${
           playbackMode
             ? 'bg-[#D97736]/20 text-[#D97736] border-[#D97736]/40'
-            : 'bg-[#0a1628]/80 text-[#4a6385] hover:text-[#5a7a9a]'
+            : 'bg-[#111111]/80 text-[#555555] hover:text-[#666666]'
         }`}
       >
         PLAYBACK

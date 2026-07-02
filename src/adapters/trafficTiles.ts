@@ -24,7 +24,7 @@ export async function createTrafficSession(): Promise<SessionResult> {
     throw new Error(`createSession failed: ${res.status} — ${text}`)
   }
   const data = await res.json()
-  console.info('[TrafficTiles] createSession response:', data)
+  console.debug('[TrafficTiles] session created, expiry:', data.expiry)
   // Google returns expiry as seconds since epoch (string)
   const expiry = data.expiry
     ? Number(data.expiry) * 1000

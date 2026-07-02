@@ -29,3 +29,8 @@ design-*.html
 worldview_command_center*.html
 Worldview_PRD*.txt
 CleanShot*
+.gstack/
+
+# Stale extracted copy of the repo (safe to delete)
+worldview-main/
+node-compile-cache/

@@ -1,9 +1,7 @@
 import { X } from 'lucide-react'
-import { useState, useEffect } from 'react'
-import { useStore, type ShaderParams } from '../store'
-import { fetchCCTVSnapshot } from '../adapters/cctv'
-import { CollapsibleSection } from './ui/CollapsibleSection'
-import { Slider } from './ui/Slider'
+import { useState } from 'react'
+import { useStore } from '../store'
+import { proxyImageUrl } from '../adapters/cctv'
 
 export function SidebarRight() {
   const selectedEntity = useStore((s) => s.selectedEntity)
@@ -11,136 +9,16 @@ export function SidebarRight() {
   const cleanUI = useStore((s) => s.cleanUI)
 
   if (cleanUI) return null
+  if (!selectedEntity) return null
 
   return (
-    <div className="absolute top-[50%] -translate-y-1/2 right-3 z-20 pointer-events-auto w-[200px] max-h-[75vh] flex flex-col gap-2 overflow-y-auto no-scrollbar">
-      {selectedEntity && (
-        <div className="glass-panel overflow-hidden">
-          <InspectPanel entity={selectedEntity} onClose={() => setSelectedEntity(null)} />
-        </div>
-      )}
-      <ControlStack />
-    </div>
-  )
-}
-
-// ─── Control Stack ──────────────────────────────────────────────────────────
-
-function ControlStack() {
-  const activeMode = useStore((s) => s.activeMode)
-  const shaderParams = useStore((s) => s.shaderParams)
-  const setShaderParam = useStore((s) => s.setShaderParam)
-  const hudLayout = useStore((s) => s.hudLayout)
-  const setHudLayout = useStore((s) => s.setHudLayout)
-  const toggleCleanUI = useStore((s) => s.toggleCleanUI)
-  const showLabels = useStore((s) => s.showLabels)
-  const toggleLabels = useStore((s) => s.toggleLabels)
-
-  // Mode-specific slider config
-  const modeSliders = getModeSliders(activeMode)
-
-  return (
-    <div className="flex flex-col gap-2">
-      {/* DISPLAY (HUD + Labels) */}
-      <div className="glass-panel px-3 py-2">
-        <div className="flex items-center justify-between mb-1.5">
-          <span className="text-[9px] text-worldview-cyan font-bold tracking-[2px] uppercase">DISPLAY</span>
-        </div>
-        <div className="flex items-center justify-between mb-1.5">
-          <span className="text-[8px] text-[#4a6385] tracking-widest font-bold uppercase">LAYOUT</span>
-          <select
-            value={hudLayout}
-            onChange={(e) => setHudLayout(e.target.value as any)}
-            className="bg-[#0a1628] border border-worldview-border/40 text-[8px] text-worldview-text-bright px-2 py-0.5 font-mono tracking-wider appearance-none cursor-pointer hover:border-worldview-cyan/50 transition-colors"
-          >
-            <option value="Tactical">Tactical</option>
-            <option value="Minimal">Minimal</option>
-            <option value="Full">Full</option>
-          </select>
-        </div>
-        <div
-          className="flex items-center justify-between cursor-pointer hover:bg-white/5 transition-colors py-0.5"
-          onClick={toggleLabels}
-        >
-          <span className="text-[8px] text-[#4a6385] tracking-widest font-bold uppercase">LABELS</span>
-          <div className={`w-5 h-2.5 rounded-full relative transition-colors ${showLabels ? 'bg-worldview-cyan' : 'bg-[#1E3050]'}`}>
-            <div className={`absolute top-0.5 w-1.5 h-1.5 rounded-full bg-worldview-bg transition-all ${showLabels ? 'left-3' : 'left-0.5'}`} />
-          </div>
-        </div>
-      </div>
-
-      {/* PARAMETERS (collapsible) */}
+    <div className="absolute top-[50%] -translate-y-1/2 right-3 z-40 pointer-events-auto w-[200px] max-h-[75vh] flex flex-col gap-2 overflow-y-auto no-scrollbar">
       <div className="glass-panel overflow-hidden">
-        <CollapsibleSection id="params" title="PARAMETERS">
-          <div className="px-3 pb-3 space-y-3">
-            <div className="text-[8px] text-[#304c78] tracking-widest font-bold uppercase">
-              MODE: <span className="text-worldview-cyan">{activeMode}</span>
-            </div>
-            {modeSliders.map((s) => (
-              <Slider
-                key={s.key}
-                label={s.label}
-                value={shaderParams[s.key]}
-                onChange={(v) => setShaderParam(s.key, v)}
-              />
-            ))}
-          </div>
-        </CollapsibleSection>
+        <InspectPanel entity={selectedEntity} onClose={() => setSelectedEntity(null)} />
       </div>
-
-      {/* CLEAN UI */}
-      <button
-        onClick={toggleCleanUI}
-        className="glass-panel px-3 py-2 text-left hover:bg-white/5 transition-colors"
-      >
-        <span className="text-[9px] text-[#5a7a9a] font-bold tracking-[2px] uppercase">CLEAN UI</span>
-      </button>
     </div>
   )
 }
-
-// ─── Mode-specific slider config ────────────────────────────────────────────
-
-function getModeSliders(mode: string): Array<{ label: string; key: keyof ShaderParams }> {
-  switch (mode) {
-    case 'Normal':
-      return [
-        { label: 'Bloom', key: 'bloom' },
-        { label: 'Sharpen', key: 'sharpen' },
-      ]
-    case 'FLIR':
-      return [
-        { label: 'Sensitivity', key: 'bloom' },
-        { label: 'WHOT/BHOT', key: 'grain' },
-        { label: 'Sharpen', key: 'sharpen' },
-        { label: 'Vignette', key: 'vignette' },
-      ]
-    case 'NVG':
-      return [
-        { label: 'Gain', key: 'bloom' },
-        { label: 'Grain', key: 'grain' },
-        { label: 'Sharpen', key: 'sharpen' },
-        { label: 'Vignette', key: 'vignette' },
-      ]
-    case 'CRT':
-      return [
-        { label: 'Bloom', key: 'bloom' },
-        { label: 'Scanlines', key: 'scanlines' },
-        { label: 'Distortion', key: 'distortion' },
-        { label: 'Vignette', key: 'vignette' },
-      ]
-    default:
-      return [
-        { label: 'Bloom', key: 'bloom' },
-        { label: 'Sharpen', key: 'sharpen' },
-        { label: 'Grain', key: 'grain' },
-        { label: 'Vignette', key: 'vignette' },
-      ]
-  }
-}
-
-// ─── Small components ───────────────────────────────────────────────────────
-
 
 // ─── Inspect Panel ──────────────────────────────────────────────────────────
 
@@ -189,7 +67,7 @@ function InspectPanel({ entity, onClose }: { entity: { type: string; data: any }
         </span>
         <button
           onClick={onClose}
-          className="text-[#5a7a9a] hover:text-worldview-cyan transition-colors"
+          className="text-[#666666] hover:text-worldview-cyan transition-colors"
         >
           <X size={14} />
         </button>
@@ -227,7 +105,7 @@ function InspectPanel({ entity, onClose }: { entity: { type: string; data: any }
 function Row({ label, value }: { label: string; value: string | number | undefined | null }) {
   return (
     <div className="flex justify-between items-baseline gap-2">
-      <span className="text-[9px] text-[#4a6385] tracking-wider font-bold uppercase shrink-0">{label}</span>
+      <span className="text-[9px] text-[#555555] tracking-wider font-bold uppercase shrink-0">{label}</span>
       <span className="text-[10px] text-worldview-text-bright font-mono text-right truncate">
         {value ?? '—'}
       </span>
@@ -306,59 +184,30 @@ function WildfireDetail({ d }: { d: any }) {
 }
 
 function CCTVDetail({ d }: { d: any }) {
-  const setCctvViewerFeed = useStore((s) => s.setCctvViewerFeed)
-  const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    setLoading(true)
-    setSnapshotUrl(null)
-    fetchCCTVSnapshot(d).then(url => {
-      setSnapshotUrl(url)
-      setLoading(false)
-    })
-    const interval = setInterval(async () => {
-      const url = await fetchCCTVSnapshot(d)
-      if (url) setSnapshotUrl(url)
-    }, d.refreshInterval ?? 30_000)
-    return () => {
-      clearInterval(interval)
-      if (snapshotUrl?.startsWith('blob:')) URL.revokeObjectURL(snapshotUrl)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [d.id])
+  const [imgError, setImgError] = useState(false)
+  const imgSrc = d.imageUrl ? proxyImageUrl(d.imageUrl) : ''
 
   return (
     <>
-      {/* Live feed preview — click to open large viewer */}
-      <button
-        onClick={() => setCctvViewerFeed(d)}
-        className="w-full mb-2 border border-worldview-border/30 rounded overflow-hidden bg-black/50 hover:border-worldview-cyan/50 transition-colors cursor-pointer"
-      >
-        {loading ? (
-          <div className="h-28 flex items-center justify-center text-[8px] text-[#5a7a9a] font-mono">
-            LOADING FEED...
+      {/* Camera preview */}
+      <div className="w-full mb-2 border border-worldview-border/30 rounded overflow-hidden bg-black/50">
+        {imgError || !imgSrc ? (
+          <div className="h-28 flex items-center justify-center text-[8px] text-worldview-red/50 font-mono">
+            SIGNAL LOST
           </div>
-        ) : snapshotUrl ? (
+        ) : (
           <img
-            src={snapshotUrl}
+            src={imgSrc}
             alt={d.name}
             className="w-full h-auto max-h-40 object-cover"
-            crossOrigin="anonymous"
+            onError={() => setImgError(true)}
           />
-        ) : (
-          <div className="h-28 flex items-center justify-center text-[8px] text-[#5a7a9a] font-mono">
-            FEED UNAVAILABLE
-          </div>
         )}
-        <div className="flex items-center justify-between px-2 py-1 bg-[#0a1628]/80">
-          <span className="text-[7px] text-worldview-cyan font-mono tracking-wider">LIVE</span>
-          <span className="text-[6px] text-[#5a7a9a] font-mono">{new Date().toLocaleTimeString()}</span>
-        </div>
-      </button>
+      </div>
       <Row label="NAME" value={d.name} />
       <Row label="SOURCE" value={d.source} />
-      <Row label="CITY" value={d.city} />
+      <Row label="REGION" value={d.region} />
+      <Row label="COUNTRY" value={d.countryName ?? d.country} />
       <Row label="LAT" value={d.latitude?.toFixed(4)} />
       <Row label="LON" value={d.longitude?.toFixed(4)} />
     </>

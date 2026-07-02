@@ -4,15 +4,14 @@ import {
   Viewer, Cartesian3, Cartesian2, Color,
   LabelCollection, LabelStyle, HorizontalOrigin, VerticalOrigin,
   PointPrimitiveCollection, BillboardCollection, NearFarScalar,
-  Primitive, GeometryInstance, PolylineGeometry, PolylineColorAppearance,
+  Primitive, GeometryInstance, PolylineGeometry, PolylineColorAppearance, PolylineCollection, Material,
   ColorGeometryInstanceAttribute,
-  HeadingPitchRange, Cartographic, Ellipsoid, BoundingSphere,
+  HeadingPitchRange, Cartographic, Ellipsoid, BoundingSphere, DistanceDisplayCondition,
   Ion, createGooglePhotorealistic3DTileset, GoogleMaps,
   Math as CesiumMath,
   ScreenSpaceEventHandler, ScreenSpaceEventType, defined,
-  WebMapTileServiceImageryProvider, ImageryLayer, GeographicTilingScheme,
+  ImageryLayer, GeographicTilingScheme,
   UrlTemplateImageryProvider, WebMercatorTilingScheme,
-  PolygonGeometry, PolygonHierarchy, PerInstanceColorAppearance,
   Matrix4,
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
@@ -29,13 +28,20 @@ import { useEntities } from './hooks/useEntities'
 import { usePlaybackEngine } from './hooks/usePlaybackEngine'
 import { useKeyboard } from './hooks/useKeyboard'
 import { useStore } from './store'
+import { LANDMARKS } from './data/landmarks'
 import { PostProcessManager } from './systems/PostProcessing'
 import { TrafficParticleSystem } from './systems/TrafficParticles'
 import { CameraOrbitSystem } from './systems/CameraOrbit'
 import { EntityInterpolationSystem } from './systems/EntityInterpolation'
-import { CCTVProjectionSystem } from './systems/CCTVProjection'
-import { CCTVViewer } from './components/CCTVViewer'
+import { HeatmapLayer, type ColorRampStop } from './systems/HeatmapLayer'
+import { CCTVPanel } from './components/CCTVPanel'
+import { EntityTrackingPanel } from './components/EntityTrackingPanel'
+import { IntelFeed } from './components/IntelFeed'
+import { SatellitePanel } from './components/SatellitePanel'
+import { useCameras } from './hooks/useCameras'
+import { type CameraFeed } from './adapters/cctv'
 import { createTrafficSession, getTrafficTileUrl, TrafficDataSampler } from './adapters/trafficTiles'
+import { trackSatelliteOrbit } from './adapters/satellites'
 
 Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN
 GoogleMaps.defaultApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY
@@ -57,27 +63,40 @@ const COL_SAT_GEO  = Color.fromCssColorString('#D4A017')  // gold  — GEO ~3578
 const COL_SAT_HEO  = Color.fromCssColorString('#D97736')  // orange — HEO > 35786 km
 const COL_SEISMIC_LO = Color.fromCssColorString('#D97736') // orange M2.5–4.9
 const COL_SEISMIC_HI = Color.fromCssColorString('#DD4444') // red    M5+
-const COL_LABEL    = Color.fromCssColorString('#C8D8E8')  // pale blue-white
 const COL_BG       = new Color(0.02, 0.04, 0.1, 0.82)
 
 const MILITARY_SQUAWKS = new Set(['7500', '7600', '7700'])
 
-// Known military callsign prefixes (partial list)
-const MIL_PREFIXES = ['RCH', 'EVAC', 'SAM', 'DOOM', 'TOPCAT', 'EPIC', 'JAKE', 'IRON', 'BISON',
-  'BDOG', 'HAVOC', 'BOXER', 'DUKE', 'KING', 'NAVY', 'SPAR', 'REACH', 'FORTE', 'RRR']
+// ─── altitude-based coloring & scaling ──────────────────────────────────────
+const COL_ALT_CRUISE = Color.fromCssColorString('#00D4FF')  // >=35K ft — cyan
+const COL_ALT_HIGH   = Color.fromCssColorString('#00BFFF')  // >=20K ft — light blue
+const COL_ALT_MID    = Color.fromCssColorString('#FFD700')  // >=10K ft — gold
+const COL_ALT_LOW    = Color.fromCssColorString('#FF8C00')  // >=3K ft  — orange
+const COL_ALT_GROUND = Color.fromCssColorString('#FF4444')  // <3K ft   — red
+
+function getAltitudeColor(altMeters: number) {
+  if (altMeters >= 10668) return COL_ALT_CRUISE  // 35K ft
+  if (altMeters >= 6096)  return COL_ALT_HIGH    // 20K ft
+  if (altMeters >= 3048)  return COL_ALT_MID     // 10K ft
+  if (altMeters >= 914)   return COL_ALT_LOW     // 3K ft
+  return COL_ALT_GROUND
+}
+
+function getAltitudeScale(altMeters: number): number {
+  if (altMeters >= 9144) return 1.5  // 30K ft
+  if (altMeters >= 4572) return 1.3  // 15K ft
+  return 1.1
+}
+
+import { isMilitaryFlight } from './adapters/aviation'
 
 type AviationCategory = 'civil' | 'military' | 'helicopter' | 'uav' | 'unknown'
 
 function classifyFlight(flight: any): AviationCategory {
   const cs = (flight.callsign ?? '').trim().toUpperCase()
-  const squawk = flight.squawk ?? ''
 
-  // Flag from ADSB data (dbFlags bit 0)
-  if (flight.military) return 'military'
-
-  // Military squawks
-  if (squawk >= '5000' && squawk <= '5777') return 'military'
-  if (MIL_PREFIXES.some(p => cs.startsWith(p))) return 'military'
+  // Military classification (shared with useEntities data split)
+  if (isMilitaryFlight(flight)) return 'military'
 
   // Helicopter heuristic: very low speed + low altitude + not on ground
   // Also common heli callsign patterns
@@ -257,6 +276,7 @@ function createCrosshairImage(size = 64): string {
 function App() {
   const cesiumContainer = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
+  const tilesetRef = useRef<any>(null)
 
   // ── GPU primitive collection refs ──────────────────────────────────────────
   const airplaneImageRef    = useRef<string | null>(null)
@@ -278,17 +298,19 @@ function App() {
   const milLabelsRef      = useRef<LabelCollection | null>(null)
   const flightTrailPrimRef = useRef<Primitive | null>(null)
   const satOrbitPrimRef    = useRef<Primitive | null>(null)
-  const aqPointsRef        = useRef<PointPrimitiveCollection | null>(null)
-  const aqLabelsRef        = useRef<LabelCollection | null>(null)
-  const weatherPointsRef   = useRef<PointPrimitiveCollection | null>(null)
-  const weatherLabelsRef   = useRef<LabelCollection | null>(null)
+  const aqHeatmapRef       = useRef<HeatmapLayer | null>(null)
+  const wxHeatmapRef       = useRef<HeatmapLayer | null>(null)
   const seismicLabelsRef   = useRef<LabelCollection | null>(null)
   const fireLabelsRef      = useRef<LabelCollection | null>(null)
+  const cctvBillboardsRef  = useRef<BillboardCollection | null>(null)
   const cctvLabelsRef      = useRef<LabelCollection | null>(null)
   const crosshairBbRef     = useRef<BillboardCollection | null>(null)
   const crosshairImageRef  = useRef<string | null>(null)
+  const crosshairBillboardRef = useRef<any>(null) // single billboard instance for per-frame updates
   const nightLightsLayerRef = useRef<ImageryLayer | null>(null)
-  const gpsJamPrimRef = useRef<Primitive | null>(null)
+  const gpsJamHeatmapRef = useRef<HeatmapLayer | null>(null)
+  const satProjectionLinesRef = useRef<PolylineCollection | null>(null)
+  const satProjectionIndexMap = useRef<Map<string, any[]>>(new Map())
 
   // ── Index maps: id → primitive (for O(1) updates) ─────────────────────────
   const flightIndexMap  = useRef<Map<string, { billboard: any; label: any }>>(new Map())
@@ -309,20 +331,45 @@ function App() {
   const trafficLayerRef = useRef<ImageryLayer | null>(null)
   const trafficSamplerRef = useRef<TrafficDataSampler | null>(null)
   const trafficSessionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const cctvSystemRef = useRef<CCTVProjectionSystem | null>(null)
+  const cctvIconRef = useRef<string | null>(null)
+  const cctvIndexMap = useRef<Map<string, { billboard: any; label: any }>>(new Map())
 
   const { playbackTimeRef, tick: playbackTick } = usePlaybackEngine()
-  const { flights, militaryFlights, vessels, seismicEvents, wildfires, sats, airQuality, weather, gpsJam, roadSegments, cctvFeeds } = useEntities(playbackTimeRef)
+  const { flights, militaryFlights, vessels, seismicEvents, wildfires, sats, airQuality, weather, gpsJam, roadSegments } = useEntities(playbackTimeRef)
   const { selectedCity, activeLayers } = useStore()
+  const selectedLandmark = useStore((s) => s.selectedLandmark)
+  const citySeq = useStore((s) => s._citySeq)
   const activeMode = useStore((s) => s.activeMode)
   const shaderParams = useStore((s) => s.shaderParams)
   const trackedEntity = useStore((s) => s.trackedEntity)
+  // While the initial track flyTo animates, the per-frame camera follow must
+  // hold off or the two fight over the camera every frame
+  const followPauseUntilRef = useRef(0)
   const showLabels = useStore((s) => s.showLabels)
   const aviationFilters = useStore((s) => s.aviationFilters)
   const trafficDensity = useStore((s) => s.trafficDensity)
   const trafficMaxParticles = useStore((s) => s.trafficMaxParticles)
-  const cctvViewerFeed = useStore((s) => s.cctvViewerFeed)
-  const setCctvViewerFeed = useStore((s) => s.setCctvViewerFeed)
+  const playbackMode = useStore((s) => s.playbackMode)
+  const playbackTime = useStore((s) => s.playbackTime)
+  const showPlaybackTrails = useStore((s) => s.showPlaybackTrails)
+  const terrainExaggeration = useStore((s) => s.terrainExaggeration)
+  const bloomIntensity = useStore((s) => s.bloomIntensity)
+  const pixelateSize = useStore((s) => s.pixelateSize)
+  const sharpenIntensity = useStore((s) => s.sharpenIntensity)
+  const showSatProjections = useStore((s) => s.showSatProjections)
+  const showSatOrbits = useStore((s) => s.showSatOrbits)
+  const hiddenSatCatalogs = useStore((s) => s.hiddenSatCatalogs)
+  const globeViewMode = useStore((s) => s.globeViewMode)
+
+  // ── CCTV (new multi-source system) ────────────────────────────────────────
+  const wantCctv = activeLayers.includes('cctv')
+  const cctvCountryFilter = useStore((s) => s.cctvCountryFilter)
+  const { cameras: cctvCameras, totalOnline, totalCameras, availableCountries } = useCameras({
+    enabled: wantCctv,
+    countryFilter: cctvCountryFilter,
+  })
+  const cctvCamerasRef = useRef(cctvCameras)
+  cctvCamerasRef.current = cctvCameras
 
   useKeyboard(viewerRef)
 
@@ -343,8 +390,6 @@ function App() {
   airQualityRef.current = airQuality
   const weatherRef = useRef(weather)
   weatherRef.current = weather
-  const cctvFeedsRef = useRef(cctvFeeds)
-  cctvFeedsRef.current = cctvFeeds
 
   // ── Viewer init ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -365,7 +410,7 @@ function App() {
       navigationInstructionsInitiallyVisible: false,
       baseLayer: false,
       requestRenderMode: true,
-      maximumRenderTimeChange: Infinity,
+      maximumRenderTimeChange: 0.5,  // auto-render every 500ms to settle tiles
     })
 
     const creditEl = viewer.cesiumWidget.creditContainer as HTMLElement
@@ -391,7 +436,16 @@ function App() {
 
     createGooglePhotorealistic3DTileset()
       .then(tileset => {
-        if (!viewer.isDestroyed()) viewer.scene.primitives.add(tileset)
+        if (viewer.isDestroyed()) return
+        // Aggressively load higher-detail tiles sooner
+        tileset.maximumScreenSpaceError = 4        // default 16 — lower = sharper
+        // @ts-ignore — cacheBytes is the modern name for maximumMemoryUsage
+        tileset.cacheBytes = 2048 * 1024 * 1024     // 2GB cache
+        tileset.preloadFlightDestinations = true
+        tileset.preloadWhenHidden = true
+        tileset.preferLeaves = true
+        viewer.scene.primitives.add(tileset)
+        tilesetRef.current = tileset
       })
       .catch(err => console.error('3D Tiles failed:', err))
 
@@ -407,17 +461,14 @@ function App() {
     const satl = new LabelCollection()
     const mb = new BillboardCollection()
     const ml = new LabelCollection()
-    const aqp = new PointPrimitiveCollection()
-    const aql = new LabelCollection()
-    const wxp = new PointPrimitiveCollection()
-    const wxl = new LabelCollection()
     const seisL = new LabelCollection()
     const firL = new LabelCollection()
+    const cctvBb = new BillboardCollection()
     const cctvL = new LabelCollection()
 
     const xhairBb = new BillboardCollection()
 
-    for (const c of [fb, fl, vp, vl, sp, spulse, fip, satp, satl, mb, ml, aqp, aql, wxp, wxl, seisL, firL, cctvL, xhairBb]) {
+    for (const c of [fb, fl, vp, vl, sp, spulse, fip, satp, satl, mb, ml, seisL, firL, cctvBb, cctvL, xhairBb]) {
       viewer.scene.primitives.add(c)
     }
 
@@ -432,15 +483,16 @@ function App() {
     satLabelsRef.current     = satl
     milBillboardsRef.current  = mb
     milLabelsRef.current     = ml
-    aqPointsRef.current      = aqp
-    aqLabelsRef.current      = aql
-    weatherPointsRef.current = wxp
-    weatherLabelsRef.current = wxl
     seismicLabelsRef.current = seisL
     fireLabelsRef.current    = firL
+    cctvBillboardsRef.current = cctvBb
     cctvLabelsRef.current    = cctvL
     crosshairBbRef.current   = xhairBb
     crosshairImageRef.current = createCrosshairImage(64)
+
+    const satProjLines = new PolylineCollection()
+    viewer.scene.primitives.add(satProjLines)
+    satProjectionLinesRef.current = satProjLines
 
     // Pre-render seismic images
     seismicDotImageRef.current  = createSeismicDotImage(16)
@@ -461,10 +513,10 @@ function App() {
       try {
         const sess = await createTrafficSession()
         if (viewer.isDestroyed()) return
-        console.info('[Traffic] Session created, token:', sess.session.slice(0, 20) + '...', 'expiry:', new Date(sess.expiry).toISOString())
+        console.debug('[Traffic] Session created, expiry:', new Date(sess.expiry).toISOString())
 
         const tileUrl = getTrafficTileUrl(sess.session)
-        console.info('[Traffic] Tile URL template:', tileUrl)
+        console.debug('[Traffic] Tile URL template ready')
 
         // Add CesiumJS imagery layer (Web Mercator tiles on 3D globe)
         const provider = new UrlTemplateImageryProvider({
@@ -531,9 +583,18 @@ function App() {
     const interpSys = new EntityInterpolationSystem()
     interpSystemRef.current = interpSys
 
-    // ── CCTV projection system ───────────────────────────────────────────
-    const cctvSys = new CCTVProjectionSystem(viewer)
-    cctvSystemRef.current = cctvSys
+    // ── Pre-render CCTV camera icon (country colors applied per billboard) ──
+    {
+      const sz = 24, canvas = document.createElement('canvas')
+      canvas.width = sz; canvas.height = sz
+      const ctx = canvas.getContext('2d')!
+      // Camera icon: simple filled circle with inner dot
+      ctx.fillStyle = '#ffffff'
+      ctx.beginPath(); ctx.arc(12, 12, 10, 0, Math.PI * 2); ctx.fill()
+      ctx.fillStyle = '#000000'
+      ctx.beginPath(); ctx.arc(12, 12, 4, 0, Math.PI * 2); ctx.fill()
+      cctvIconRef.current = canvas.toDataURL()
+    }
 
     // ── Animation loop (seismic pulses + traffic particles) ─────────────────
     let animFrame: number | null = null
@@ -566,6 +627,52 @@ function App() {
       // Entity interpolation — smooth position updates between data snapshots
       if (interpSys.tick(dt)) {
         viewer.scene.requestRender()
+      }
+
+      // Camera follow: keep tracked flight centered using interpolated position
+      {
+        const te = useStore.getState().trackedEntity
+        if (te && (te.type === 'flight' || te.type === 'vessel') && now > followPauseUntilRef.current) {
+          const prefix = te.type === 'flight' ? 'f-' : 'v-'
+          // Try civil first, then military for flights
+          let pos = interpSys.getPosition(`${prefix}${te.key}`)
+          if (!pos && te.type === 'flight') {
+            pos = interpSys.getPosition(`m-${te.key}`)
+          }
+          if (pos) {
+            const range = te.type === 'flight' ? 8_000 : 3_000
+            const camAlt = pos.alt + range
+            viewer.camera.setView({
+              destination: Cartesian3.fromDegrees(pos.lon, pos.lat, camAlt),
+              orientation: { heading: 0, pitch: CesiumMath.toRadians(-90), roll: 0 },
+            })
+            viewer.scene.requestRender()
+          }
+        }
+      }
+
+      // Crosshair sync: follow entity's interpolated billboard position every frame
+      {
+        const xhairBb = crosshairBillboardRef.current
+        if (xhairBb) {
+          const se = useStore.getState().selectedEntity
+          if (se) {
+            let entityBb: any = null
+            if (se.type === 'flight') {
+              const entry = flightIndexMap.current.get(se.data.icao24) ?? milIndexMap.current.get(se.data.icao24)
+              entityBb = entry?.billboard
+            } else if (se.type === 'vessel') {
+              const entry = vesselIndexMap.current.get(se.data.mmsi)
+              entityBb = entry?.billboard
+            } else if (se.type === 'satellite') {
+              const entry = satIndexMap.current.get(se.data.id)
+              entityBb = entry?.billboard
+            }
+            if (entityBb?.position) {
+              xhairBb.position = entityBb.position
+            }
+          }
+        }
       }
 
       // Playback engine tick — advances virtual time
@@ -624,7 +731,10 @@ function App() {
         } else if (type === 'weather') {
           data = weatherRef.current.find((w: any) => w.id === key)
         } else if (type === 'cctv') {
-          data = cctvFeedsRef.current.find((f: any) => f.id === key)
+          // CCTV clicks go to CCTVPanel preview, not InspectPanel
+          useStore.getState().setSelectedCameraId(key)
+          useStore.getState().setSelectedEntity(null)
+          return
         }
 
         if (data) {
@@ -671,9 +781,18 @@ function App() {
           const cartos = validCorners.map(c => Cartographic.fromCartesian(c!, ellipsoid))
           const lats = cartos.map(c => CesiumMath.toDegrees(c.latitude))
           const lons = cartos.map(c => CesiumMath.toDegrees(c.longitude))
+          // In oblique views only the near-ground corners hit the ellipsoid,
+          // collapsing the bbox to ~0 area. Pad to a minimum extent scaled
+          // by altitude so viewport-based fetches (Overpass traffic) get a
+          // usable region.
+          const minHalfExtent = Math.max(0.02, (height * 1.5) / 111_320)
+          const cLat = (Math.min(...lats) + Math.max(...lats)) / 2
+          const cLon = (Math.min(...lons) + Math.max(...lons)) / 2
           const bbox: [number, number, number, number] = [
-            Math.min(...lats), Math.min(...lons),
-            Math.max(...lats), Math.max(...lons),
+            Math.min(Math.min(...lats), cLat - minHalfExtent),
+            Math.min(Math.min(...lons), cLon - minHalfExtent),
+            Math.max(Math.max(...lats), cLat + minHalfExtent),
+            Math.max(Math.max(...lons), cLon + minHalfExtent),
           ]
           useStore.getState().setCameraBbox(bbox, height)
         } else {
@@ -698,7 +817,54 @@ function App() {
     // Initial bbox
     updateCameraBbox()
 
+    // ── Oblique-view: altitude-driven pitch to keep sky in frame ──────────
+    // As camera zooms in (lower altitude), tilt toward the horizon so the
+    // ground doesn't fill the entire viewport. The curve:
+    //   ≤ 500m    → pitch -15°  (nearly horizontal — mostly sky)
+    //   ~150km    → pitch -35°
+    //   ~3,500km  → pitch -55°
+    //   ≥ 25,000km→ pitch -65°  (steep oblique — globe in bottom half)
+    let obliqueAdjusting = false  // re-entry guard
+
+    const applyObliquePitch = () => {
+      if (obliqueAdjusting) return
+      if (useStore.getState().globeViewMode !== 'oblique') return
+      if (useStore.getState().playbackOrbit) return
+
+      const cam = viewer.camera
+      const alt = cam.positionCartographic.height
+
+      const MIN_ALT = 500
+      const MAX_ALT = 25_000_000
+      const CLOSE_PITCH = -15   // near ground: very oblique, mostly sky
+      const FAR_PITCH = -65     // global: steeper oblique, globe in bottom half
+
+      const clamped = Math.max(MIN_ALT, Math.min(MAX_ALT, alt))
+      // Logarithmic 0..1, then sqrt for faster initial steepening
+      const tLinear = Math.log(clamped / MIN_ALT) / Math.log(MAX_ALT / MIN_ALT)
+      const t = Math.sqrt(tLinear)
+      const targetPitchDeg = CLOSE_PITCH + t * (FAR_PITCH - CLOSE_PITCH)
+      const targetPitchRad = CesiumMath.toRadians(targetPitchDeg)
+
+      // Only adjust if pitch differs meaningfully (>2°)
+      if (Math.abs(cam.pitch - targetPitchRad) > CesiumMath.toRadians(2)) {
+        obliqueAdjusting = true
+        cam.setView({
+          destination: cam.positionWC.clone(),
+          orientation: {
+            heading: cam.heading,
+            pitch: targetPitchRad,
+            roll: cam.roll,
+          },
+        })
+        obliqueAdjusting = false
+      }
+    }
+
+    viewer.camera.moveEnd.addEventListener(applyObliquePitch)
+
     return () => {
+      viewer.camera.moveEnd.removeEventListener(applyObliquePitch)
       viewer.camera.moveEnd.removeEventListener(updateCameraBbox)
       if (animFrame != null) cancelAnimationFrame(animFrame)
       ppManager.destroy()
@@ -706,7 +872,6 @@ function App() {
       if (trafficLayerRef.current) viewer.imageryLayers.remove(trafficLayerRef.current)
       if (trafficSessionTimerRef.current) clearTimeout(trafficSessionTimerRef.current)
       trafficSamplerRef.current?.clear()
-      cctvSys.destroy()
       handler.destroy()
       viewer.destroy()
     }
@@ -717,7 +882,7 @@ function App() {
   const pbCameraDistance = useStore((s) => s.cameraDistance)
   useEffect(() => {
     if (playbackOrbit) {
-      orbitSystemRef.current?.reset(pbCameraDistance)
+      orbitSystemRef.current?.reset()
       // Unlock camera from any previous lookAt constraint when orbit stops
     } else {
       const viewer = viewerRef.current
@@ -737,9 +902,31 @@ function App() {
     postProcessRef.current?.setParams(shaderParams)
   }, [shaderParams])
 
+  // ── Bloom effect sync ─────────────────────────────────────────────────────
+  useEffect(() => {
+    postProcessRef.current?.setBloom(bloomIntensity)
+  }, [bloomIntensity])
+
+  // ── Pixelate effect sync ──────────────────────────────────────────────────
+  useEffect(() => {
+    postProcessRef.current?.setPixelate(pixelateSize)
+  }, [pixelateSize])
+
+  // ── Sharpen effect sync ───────────────────────────────────────────────────
+  useEffect(() => {
+    postProcessRef.current?.setSharpen(sharpenIntensity)
+  }, [sharpenIntensity])
+
+  // ── Terrain exaggeration sync ──────────────────────────────────────────────
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer || viewer.isDestroyed()) return
+    viewer.scene.verticalExaggeration = terrainExaggeration
+  }, [terrainExaggeration])
+
   // ── Label visibility toggle ────────────────────────────────────────────────
   useEffect(() => {
-    const collections = [flightLabelsRef, milLabelsRef, vesselLabelsRef, satLabelsRef, aqLabelsRef, weatherLabelsRef, seismicLabelsRef, fireLabelsRef, cctvLabelsRef]
+    const collections = [flightLabelsRef, milLabelsRef, vesselLabelsRef, satLabelsRef, seismicLabelsRef, fireLabelsRef, cctvLabelsRef]
     for (const ref of collections) {
       if (ref.current) ref.current.show = showLabels
     }
@@ -754,13 +941,14 @@ function App() {
     if (!xhair || !img) return
 
     xhair.removeAll()
+    crosshairBillboardRef.current = null
 
     if (!selectedEntity) {
       viewerRef.current?.scene.requestRender()
       return
     }
 
-    // Re-lookup latest data from live refs so crosshair follows moving entities
+    // Re-lookup latest data from live refs for initial position
     const { type, data: origData } = selectedEntity
     let d = origData
     if (type === 'flight') {
@@ -793,7 +981,7 @@ function App() {
     if (lon == null || lat == null) return
 
     const pos = Cartesian3.fromDegrees(lon, lat, alt)
-    xhair.add({
+    const bb = xhair.add({
       position: pos,
       image: img,
       scale: 1.0,
@@ -802,13 +990,14 @@ function App() {
       verticalOrigin: VerticalOrigin.CENTER,
       sizeInMeters: false,
     })
+    crosshairBillboardRef.current = bb
 
     viewerRef.current?.scene.requestRender()
   }, [selectedEntity, flights, militaryFlights, vessels, sats, seismicEvents, wildfires])
 
   // ── Traffic system sync ────────────────────────────────────────────────────
   useEffect(() => {
-    console.info(`[Traffic Sync] roadSegments=${roadSegments.length}, system=${!!trafficSystemRef.current}`)
+    console.debug(`[Traffic Sync] roadSegments=${roadSegments.length}, system=${!!trafficSystemRef.current}`)
     trafficSystemRef.current?.setRoadNetwork(roadSegments)
   }, [roadSegments])
 
@@ -828,47 +1017,82 @@ function App() {
     }
   }, [wantTraffic])
 
-  // ── CCTV system sync ─────────────────────────────────────────────────────
+  // ── CCTV billboard + label sync (country-colored) ────────────────────────
   useEffect(() => {
-    console.info(`[CCTV Sync] cctvFeeds=${cctvFeeds.length}, system=${!!cctvSystemRef.current}`)
-    if (cctvSystemRef.current && cctvFeeds.length > 0) {
-      cctvSystemRef.current.setFeeds(cctvFeeds)
-    } else if (cctvSystemRef.current && cctvFeeds.length === 0) {
-      cctvSystemRef.current.setFeeds([])
-    }
-  }, [cctvFeeds])
-
-  // ── CCTV labels sync ──────────────────────────────────────────────────────
-  useEffect(() => {
+    const bb = cctvBillboardsRef.current
     const cl = cctvLabelsRef.current
-    if (!cl) return
+    const icon = cctvIconRef.current
+    if (!bb || !cl || !icon) return
 
-    cl.removeAll()
+    const COUNTRY_COL: Record<string, Color> = {
+      GB: Color.fromCssColorString('#00D4FF'),  // cyan
+      US: Color.fromCssColorString('#FF9500'),  // amber
+      AU: Color.fromCssColorString('#39FF14'),  // green
+    }
+    const DEFAULT_COL = Color.fromCssColorString('#00D4FF')
 
-    for (const feed of cctvFeeds) {
-      if (feed.latitude == null || feed.longitude == null) continue
-      const pos = Cartesian3.fromDegrees(feed.longitude, feed.latitude, 0)
-      const name = (feed.name ?? '').length > 15 ? (feed.name as string).slice(0, 15) + '…' : (feed.name ?? '')
-      cl.add({
-        position: pos,
-        text: name,
-        font: 'bold 11px "JetBrains Mono", monospace',
-        fillColor: Color.fromCssColorString('#00F0FF'),
-        outlineColor: Color.BLACK,
-        outlineWidth: 3,
-        style: LabelStyle.FILL_AND_OUTLINE,
-        horizontalOrigin: HorizontalOrigin.LEFT,
-        verticalOrigin: VerticalOrigin.CENTER,
-        pixelOffset: new Cartesian2(10, 0),
-        showBackground: true,
-        backgroundColor: COL_BG,
-        translucencyByDistance: new NearFarScalar(1e4, 1.0, 2e6, 0.0),
-        show: useStore.getState().showLabels,
-      })
+    const incoming = new Set(cctvCameras.map(c => c.id))
+    const idx = cctvIndexMap.current
+
+    // Remove stale
+    for (const [id, entry] of idx) {
+      if (!incoming.has(id)) {
+        bb.remove(entry.billboard)
+        cl.remove(entry.label)
+        idx.delete(id)
+      }
+    }
+
+    // Add / update
+    for (const cam of cctvCameras) {
+      if (cam.latitude == null || cam.longitude == null) continue
+      if (!isFinite(cam.latitude) || !isFinite(cam.longitude)) continue
+      if (cam.latitude < -90 || cam.latitude > 90 || cam.longitude < -180 || cam.longitude > 180) continue
+
+      const pos = Cartesian3.fromDegrees(cam.longitude, cam.latitude, 0)
+      const col = COUNTRY_COL[cam.country] ?? DEFAULT_COL
+      const name = cam.name.length > 15 ? cam.name.slice(0, 15) + '\u2026' : cam.name
+
+      if (idx.has(cam.id)) {
+        // Update position only (source doesn't change)
+        const entry = idx.get(cam.id)!
+        entry.billboard.position = pos
+        entry.label.position = pos
+      } else {
+        const billboard = bb.add({
+          position: pos,
+          image: icon,
+          width: 20,
+          height: 20,
+          id: { type: 'cctv', key: cam.id },
+          color: col,
+          horizontalOrigin: HorizontalOrigin.CENTER,
+          verticalOrigin: VerticalOrigin.CENTER,
+          scaleByDistance: new NearFarScalar(200, 1.0, 5e6, 0.4),
+          distanceDisplayCondition: new DistanceDisplayCondition(0, 2_000_000),
+        })
+        const label = cl.add({
+          position: pos,
+          text: name,
+          font: 'bold 10px "JetBrains Mono", monospace',
+          fillColor: col,
+          outlineColor: Color.BLACK,
+          outlineWidth: 3,
+          style: LabelStyle.FILL_AND_OUTLINE,
+          horizontalOrigin: HorizontalOrigin.LEFT,
+          verticalOrigin: VerticalOrigin.CENTER,
+          pixelOffset: new Cartesian2(14, 0),
+          showBackground: true,
+          backgroundColor: COL_BG,
+          distanceDisplayCondition: new DistanceDisplayCondition(0, 500_000),
+          show: useStore.getState().showLabels,
+        })
+        idx.set(cam.id, { billboard, label })
+      }
     }
 
     viewerRef.current?.scene.requestRender()
-  }, [cctvFeeds])
+  }, [cctvCameras])
 
   // ── Camera: fly to selected city (Nominatim smart centering) ────────────────
   // Fallback coords used when Nominatim is unavailable or for Global view
@@ -896,14 +1120,22 @@ function App() {
     // Clear any active tracking when navigating to a city
     useStore.getState().setTrackedEntity(null)
 
-    // Global view — use fallback directly
+    // Global view — use fallback directly, with nadir/oblique support
     if (selectedCity === 'Global') {
-      const g = CITY_FALLBACKS['Global']
-      viewer.camera.flyTo({
-        destination: Cartesian3.fromDegrees(g.lon, g.lat, g.height),
-        orientation: { heading: 0, pitch: CesiumMath.toRadians(g.pitch), roll: 0 },
-        duration: 3,
-      })
+      if (globeViewMode === 'oblique') {
+        viewer.camera.flyTo({
+          destination: Cartesian3.fromDegrees(0, 20, 25_000_000),
+          orientation: { heading: CesiumMath.toRadians(10), pitch: CesiumMath.toRadians(-65), roll: 0 },
+          duration: 2.5,
+        })
+      } else {
+        const g = CITY_FALLBACKS['Global']
+        viewer.camera.flyTo({
+          destination: Cartesian3.fromDegrees(g.lon, g.lat, g.height),
+          orientation: { heading: 0, pitch: CesiumMath.toRadians(g.pitch), roll: 0 },
+          duration: 3,
+        })
+      }
       return
     }
 
@@ -992,6 +1224,16 @@ function App() {
       }
     }
 
+    // If the city has landmarks, fly to landmark[0] instead of city center
+    const defaultLandmark = LANDMARKS[selectedCity]?.[0]
+    if (defaultLandmark) {
+      flyToLandmark(viewer, defaultLandmark)
+      // Set landmark in store but skip the landmark effect (we already flew)
+      landmarkSkipRef.current = true
+      useStore.getState().setLandmark(defaultLandmark.name)
+      return
+    }
+
     ;(async () => {
       // Try Google first, fall back to Nominatim
       if (await geocodeWithGoogle()) return
@@ -1004,33 +1246,90 @@ function App() {
     })()
 
     return () => controller.abort()
-  }, [selectedCity])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCity, citySeq, globeViewMode])
 
-  function flyToCity(viewer: Viewer, city: { lat: number; lon: number; height: number; pitch: number }) {
+  // ── Camera: fly to selected landmark ────────────────────────────────────────
+  const landmarkSkipRef = useRef(false)
+  useEffect(() => {
+    // Skip if this was triggered by the city-select effect setting landmark[0]
+    if (landmarkSkipRef.current) {
+      landmarkSkipRef.current = false
+      return
+    }
+    const viewer = viewerRef.current
+    if (!viewer || viewer.isDestroyed() || !selectedLandmark || !selectedCity) return
+    const landmarks = LANDMARKS[selectedCity]
+    if (!landmarks) return
+    const lm = landmarks.find((l) => l.name === selectedLandmark)
+    if (!lm) return
+    flyToLandmark(viewer, lm)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedLandmark])
+
+  /** Pump render frames until 3D tiles finish loading (max 8 seconds). */
+  function pumpTileLoading(viewer: Viewer) {
+    const tileset = tilesetRef.current
+    let frames = 0
+    const maxFrames = 480 // ~8s at 60fps
+    const tick = () => {
+      if (viewer.isDestroyed() || frames >= maxFrames) return
+      viewer.scene.requestRender()
+      frames++
+      // Stop early if tiles are fully loaded
+      if (tileset?.tilesLoaded) return
+      requestAnimationFrame(tick)
+    }
+    requestAnimationFrame(tick)
+  }
+
+  /** Fly to a landmark — uses camera.flyTo with exact captured coordinates. */
+  function flyToLandmark(viewer: Viewer, lm: { lat: number; lon: number; height: number; heading: number; pitch: number }) {
+    // Cancel any in-progress flight first
+    viewer.camera.cancelFlight()
+    viewer.camera.flyTo({
+      destination: Cartesian3.fromDegrees(lm.lon, lm.lat, lm.height),
+      orientation: {
+        heading: CesiumMath.toRadians(lm.heading),
+        pitch: CesiumMath.toRadians(lm.pitch),
+        roll: 0,
+      },
+      duration: 1.8,
+      pitchAdjustHeight: 500,  // keep arc low for close-range flights
+      complete: () => pumpTileLoading(viewer),
+    })
+    // Also pump during the flight so tiles stream in while moving
+    pumpTileLoading(viewer)
+  }
+
+  /** Fly to a geocoded city (address search / fallback coords). */
+  function flyToCity(viewer: Viewer, city: { lat: number; lon: number; height: number; heading?: number; pitch: number }) {
+    const hdg = city.heading ?? 0
+    viewer.camera.cancelFlight()
     if (city.height <= 500) {
-      // For close-up views (addresses), use flyToBoundingSphere so the target
-      // stays centered on screen even with a tilted pitch
       const target = Cartesian3.fromDegrees(city.lon, city.lat, 0)
       viewer.camera.flyToBoundingSphere(new BoundingSphere(target, 0), {
         offset: new HeadingPitchRange(
-          CesiumMath.toRadians(0),
+          CesiumMath.toRadians(hdg),
           CesiumMath.toRadians(city.pitch),
           city.height
         ),
         duration: 2.5,
+        complete: () => pumpTileLoading(viewer),
       })
     } else {
       viewer.camera.flyTo({
         destination: Cartesian3.fromDegrees(city.lon, city.lat, city.height),
         orientation: {
-          heading: CesiumMath.toRadians(0),
-          pitch:   CesiumMath.toRadians(city.pitch),
+          heading: CesiumMath.toRadians(hdg),
+          pitch: CesiumMath.toRadians(city.pitch),
           roll: 0,
         },
         duration: 2.5,
-        easingFunction: (CesiumMath as any).EASE_IN_OUT_SINE,
+        complete: () => pumpTileLoading(viewer),
       })
     }
+    pumpTileLoading(viewer)
   }
 
   // ── Track entity: follow selected flight/satellite ─────────────────────────
@@ -1045,6 +1344,11 @@ function App() {
       // Unlock camera from any lookAt constraint (satellite tracking)
       try { viewer.camera.lookAtTransform(Matrix4.IDENTITY) } catch { /* ok */ }
       return
+    }
+
+    // When tracking a satellite, mark it for orbit path rendering
+    if (trackedEntity.type === 'satellite') {
+      trackSatelliteOrbit(trackedEntity.key)
     }
 
     let lon: number | null = null
@@ -1090,18 +1394,17 @@ function App() {
 
     const isFirstTrack = trackInitRef.current !== trackedEntity.key
 
-    // Satellites: use lookAt for proper orbital tracking (keeps sat centered)
+    // Satellites: use rAF loop for smooth per-frame camera tracking
+    // (LEO sats move ~7.5 km/s — state updates every ~3s cause drift without this)
     if (trackedEntity.type === 'satellite') {
-      const target = Cartesian3.fromDegrees(lon, lat, alt)
-      const hpr = new HeadingPitchRange(
-        CesiumMath.toRadians(heading),
-        CesiumMath.toRadians(camPitchDeg),
-        range,
-      )
-
       if (isFirstTrack) {
         trackInitRef.current = trackedEntity.key
-        // Fly to initial position then lock
+        const target = Cartesian3.fromDegrees(lon, lat, alt)
+        const hpr = new HeadingPitchRange(
+          CesiumMath.toRadians(heading),
+          CesiumMath.toRadians(camPitchDeg),
+          range,
+        )
         viewer.camera.flyTo({
           destination: Cartesian3.fromDegrees(lon, lat, alt + range),
           orientation: { heading: CesiumMath.toRadians(heading), pitch: CesiumMath.toRadians(camPitchDeg), roll: 0 },
@@ -1112,32 +1415,64 @@ function App() {
             }
           },
         })
-      } else {
-        viewer.camera.lookAt(target, hpr)
-        viewer.scene.requestRender()
       }
+
+      // Start rAF loop that reads the billboard's interpolated position every frame
+      // (satsDataRef only updates on state change, but the billboard moves via interp system)
+      let rafId = 0
+      const trackFrame = () => {
+        if (viewer.isDestroyed()) return
+        const entry = satIndexMap.current.get(trackedEntity.key)
+        if (entry?.billboard?.position) {
+          const pos = entry.billboard.position
+          // Extract altitude from Cartographic to compute range
+          const carto = Cartographic.fromCartesian(pos)
+          const satAlt = carto.height
+          const satRange = Math.min(satAlt * 0.5, 500_000)
+          const satHpr = new HeadingPitchRange(
+            CesiumMath.toRadians(0),
+            CesiumMath.toRadians(-55),
+            satRange,
+          )
+          viewer.camera.lookAt(pos, satHpr)
+          viewer.scene.requestRender()
+        }
+        rafId = requestAnimationFrame(trackFrame)
+      }
+      rafId = requestAnimationFrame(trackFrame)
+
+      return () => cancelAnimationFrame(rafId)
     } else {
-      // Flights/vessels: position camera directly above
+      // Flights/vessels: initial flyTo only — continuous tracking handled in animation loop
       const camHeading = CesiumMath.toRadians(heading)
       const camPitch = CesiumMath.toRadians(camPitchDeg)
       const camAlt = alt + range
 
       if (isFirstTrack) {
         trackInitRef.current = trackedEntity.key
+        followPauseUntilRef.current = performance.now() + 1_600
         viewer.camera.flyTo({
           destination: Cartesian3.fromDegrees(lon, lat, camAlt),
           orientation: { heading: camHeading, pitch: camPitch, roll: 0 },
           duration: 1.5,
         })
-      } else {
-        viewer.camera.setView({
-          destination: Cartesian3.fromDegrees(lon, lat, camAlt),
-          orientation: { heading: camHeading, pitch: camPitch, roll: 0 },
-        })
+      }
+      // Continuous camera follow is in the animation loop (uses interpolated position)
+    }
+  }, [trackedEntity, flights, militaryFlights, vessels, sats])
+
+  // ── Clear flight trails on playback entry ──────────────────────────────────
+  useEffect(() => {
+    if (playbackMode) {
+      flightTrails.current.clear()
+      const viewer = viewerRef.current
+      if (viewer && !viewer.isDestroyed() && flightTrailPrimRef.current) {
+        viewer.scene.primitives.remove(flightTrailPrimRef.current)
+        flightTrailPrimRef.current = null
         viewer.scene.requestRender()
       }
     }
-  }, [trackedEntity, flights, militaryFlights, vessels, sats])
+  }, [playbackMode])
 
   // ── Aviation sync ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1159,7 +1494,7 @@ function App() {
     })
     const existing = flightIndexMap.current
 
-    console.info(`[Aviation Sync] ${incoming.size}/${flights.size} flights after filter`)
+    console.debug(`[Aviation Sync] ${incoming.size}/${flights.size} flights after filter`)
 
     const interp = interpSystemRef.current
 
@@ -1168,22 +1503,30 @@ function App() {
       const alt = (rawAlt > 0 && rawAlt < 20_000) ? rawAlt : 0
       const pos = Cartesian3.fromDegrees(flight.longitude!, flight.latitude!, alt)
       const isEmergency = flight.squawk ? MILITARY_SQUAWKS.has(flight.squawk) : false
-      const color = isEmergency ? COL_SQUAWK : COL_CIVIL
+      const color = isEmergency ? COL_SQUAWK : getAltitudeColor(alt)
+      const altScale = getAltitudeScale(alt)
       // CesiumJS billboard rotation is CCW radians from up; aircraft heading is CW from north
       const rotation = -((flight.true_track ?? 0) - PLANE_HEADING_OFFSET) * Math.PI / 180
 
       if (existing.has(icao)) {
         const { billboard, label } = existing.get(icao)!
-        // Feed interpolation system for smooth movement
-        if (interp) {
-          interp.updateTarget(`f-${icao}`, flight.longitude!, flight.latitude!, alt, billboard, label)
+        // In playback mode, set positions directly (useEntities already dead-reckons).
+        // In live mode, feed interp system for smooth lerp between poll snapshots.
+        if (playbackMode) {
+          billboard.position = pos
+          label.position = pos
+        } else if (interp) {
+          interp.updateTarget(`f-${icao}`, flight.longitude!, flight.latitude!, alt, billboard, label,
+            flight.velocity ?? 0, flight.true_track ?? 0, 'deadreckon')
         } else {
           billboard.position = pos
           label.position = pos
         }
         billboard.color = color
         billboard.rotation = rotation
+        billboard.scale = altScale
         label.text = formatFlightLabel(flight, icao)
+        label.fillColor = isEmergency ? COL_SQUAWK : color
       } else {
         const entityId = { type: 'flight', key: icao }
         const billboard = fb.add({
@@ -1191,17 +1534,18 @@ function App() {
           image: planeImg,
           rotation,
           color,
+          scale: altScale,
           id: entityId,
           horizontalOrigin: HorizontalOrigin.CENTER,
           verticalOrigin: VerticalOrigin.CENTER,
-          scaleByDistance: new NearFarScalar(1e3, 1.4, 8e6, 0.5),
+          scaleByDistance: new NearFarScalar(1e3, 1.2, 8e6, 0.22),
           translucencyByDistance: new NearFarScalar(5e5, 1.0, 1e7, 0.35),
         })
         const label = fl.add({
           position: pos,
           text: formatFlightLabel(flight, icao),
           font: 'bold 11px "JetBrains Mono", monospace',
-          fillColor: COL_LABEL,
+          fillColor: isEmergency ? COL_SQUAWK : color,
           id: entityId,
           style: LabelStyle.FILL_AND_OUTLINE,
           outlineWidth: 3,
@@ -1212,8 +1556,17 @@ function App() {
           showBackground: true,
           backgroundColor: COL_BG,
           scaleByDistance: new NearFarScalar(1e3, 1.0, 3e6, 0.35),
+          // Hide labels beyond 2,500 km — at global zoom thousands of labels
+          // collide into an unreadable strip
+          distanceDisplayCondition: new DistanceDisplayCondition(0, 2.5e6),
         })
         existing.set(icao, { billboard, label })
+        // Seed interp immediately so dead-reckoning (and camera tracking)
+        // works from first sighting instead of the second poll
+        if (!playbackMode) {
+          interp?.updateTarget(`f-${icao}`, flight.longitude!, flight.latitude!, alt, billboard, label,
+            flight.velocity ?? 0, flight.true_track ?? 0, 'deadreckon')
+        }
       }
     })
 
@@ -1256,56 +1609,59 @@ function App() {
 
     // Rebuild trail polylines as a Primitive
     const viewer = viewerRef.current
+    const hideTrails = playbackMode && !showPlaybackTrails
     if (viewer && !viewer.isDestroyed()) {
       if (flightTrailPrimRef.current) {
         viewer.scene.primitives.remove(flightTrailPrimRef.current)
         flightTrailPrimRef.current = null
       }
 
-      const instances: GeometryInstance[] = []
-      const milSet = new Set(militaryFlights.keys())
-      for (const [icao, trail] of trails) {
-        if (trail.length < 2) continue
-        const baseColor = milSet.has(icao) ? COL_SQUAWK : COL_CIVIL
-        // Split trail into segments of ~5 points each, with fading alpha
-        // Newest points = bright, oldest = dim
-        const segSize = Math.max(5, Math.floor(trail.length / 6))
-        for (let i = 0; i < trail.length - 1; i += segSize) {
-          const end = Math.min(i + segSize + 1, trail.length)
-          if (end - i < 2) continue
-          const coords: number[] = []
-          for (let j = i; j < end; j++) {
-            coords.push(trail[j].lon, trail[j].lat, trail[j].alt)
+      if (!hideTrails) {
+        const instances: GeometryInstance[] = []
+        const milSet = new Set(militaryFlights.keys())
+        for (const [icao, trail] of trails) {
+          if (trail.length < 2) continue
+          const baseColor = milSet.has(icao) ? COL_SQUAWK : COL_CIVIL
+          // Split trail into segments of ~5 points each, with fading alpha
+          // Newest points = bright, oldest = dim
+          const segSize = Math.max(5, Math.floor(trail.length / 6))
+          for (let i = 0; i < trail.length - 1; i += segSize) {
+            const end = Math.min(i + segSize + 1, trail.length)
+            if (end - i < 2) continue
+            const coords: number[] = []
+            for (let j = i; j < end; j++) {
+              coords.push(trail[j].lon, trail[j].lat, trail[j].alt)
+            }
+            // Alpha fades: segment at end of trail (newest) = bright, start (oldest) = dim
+            const midIdx = (i + end) / 2
+            const t = midIdx / trail.length  // 0=oldest, 1=newest
+            const alpha = 0.1 + t * 0.5      // 0.1 → 0.6
+            instances.push(new GeometryInstance({
+              geometry: new PolylineGeometry({
+                positions: Cartesian3.fromDegreesArrayHeights(coords),
+                width: 1.5,
+              }),
+              attributes: {
+                color: ColorGeometryInstanceAttribute.fromColor(baseColor.withAlpha(alpha)),
+              },
+            }))
           }
-          // Alpha fades: segment at end of trail (newest) = bright, start (oldest) = dim
-          const midIdx = (i + end) / 2
-          const t = midIdx / trail.length  // 0=oldest, 1=newest
-          const alpha = 0.1 + t * 0.5      // 0.1 → 0.6
-          instances.push(new GeometryInstance({
-            geometry: new PolylineGeometry({
-              positions: Cartesian3.fromDegreesArrayHeights(coords),
-              width: 1.5,
-            }),
-            attributes: {
-              color: ColorGeometryInstanceAttribute.fromColor(baseColor.withAlpha(alpha)),
-            },
-          }))
         }
-      }
 
-      if (instances.length > 0) {
-        const prim = new Primitive({
-          geometryInstances: instances,
-          appearance: new PolylineColorAppearance(),
-          asynchronous: true,
-        })
-        viewer.scene.primitives.add(prim)
-        flightTrailPrimRef.current = prim
+        if (instances.length > 0) {
+          const prim = new Primitive({
+            geometryInstances: instances,
+            appearance: new PolylineColorAppearance(),
+            asynchronous: true,
+          })
+          viewer.scene.primitives.add(prim)
+          flightTrailPrimRef.current = prim
+        }
       }
     }
 
     viewerRef.current?.scene.requestRender()
-  }, [flights, militaryFlights, aviationFilters])
+  }, [flights, militaryFlights, aviationFilters, playbackMode, showPlaybackTrails])
 
   // ── Military Aviation sync ──────────────────────────────────────────────────
   useEffect(() => {
@@ -1332,16 +1688,19 @@ function App() {
       const alt = (rawAlt > 0 && rawAlt < 20_000) ? rawAlt : 0
       const pos = Cartesian3.fromDegrees(flight.longitude!, flight.latitude!, alt)
       const rotation = -((flight.true_track ?? 0) - PLANE_HEADING_OFFSET) * Math.PI / 180
+      const altScale = getAltitudeScale(alt)
 
       if (existing.has(icao)) {
         const { billboard, label } = existing.get(icao)!
         if (interp) {
-          interp.updateTarget(`m-${icao}`, flight.longitude!, flight.latitude!, alt, billboard, label)
+          interp.updateTarget(`m-${icao}`, flight.longitude!, flight.latitude!, alt, billboard, label,
+            flight.velocity ?? 0, flight.true_track ?? 0, 'deadreckon')
         } else {
           billboard.position = pos
           label.position = pos
         }
         billboard.rotation = rotation
+        billboard.scale = altScale
         label.text = formatFlightLabel(flight, icao)
       } else {
         const entityId = { type: 'flight', key: icao }
@@ -1350,10 +1709,11 @@ function App() {
           image: planeImg,
           rotation,
           color: COL_SQUAWK,
+          scale: altScale,
           id: entityId,
           horizontalOrigin: HorizontalOrigin.CENTER,
           verticalOrigin: VerticalOrigin.CENTER,
-          scaleByDistance: new NearFarScalar(1e3, 1.4, 8e6, 0.5),
+          scaleByDistance: new NearFarScalar(1e3, 1.2, 8e6, 0.28),
           translucencyByDistance: new NearFarScalar(5e5, 1.0, 1e7, 0.35),
         })
         const label = ml.add({
@@ -1371,8 +1731,13 @@ function App() {
           showBackground: true,
           backgroundColor: COL_BG,
           scaleByDistance: new NearFarScalar(1e3, 1.0, 3e6, 0.35),
+          // Military labels stay visible farther out — fewer of them, higher value
+          distanceDisplayCondition: new DistanceDisplayCondition(0, 5e6),
         })
         existing.set(icao, { billboard, label })
+        // Seed interp immediately — see civil flight sync
+        interp?.updateTarget(`m-${icao}`, flight.longitude!, flight.latitude!, alt, billboard, label,
+          flight.velocity ?? 0, flight.true_track ?? 0, 'deadreckon')
       }
     })
 
@@ -1410,10 +1775,19 @@ function App() {
 
       const col = vesselTypeColor(vessel.type)
 
+      // AIS sentinels: SOG 102.3 kn = unavailable; COG 360 = unavailable.
+      // Valid speed/course lets the interp system dead-reckon the vessel in
+      // real time between (often minutes-apart) AIS position reports.
+      const sogValid = vessel.speed != null && vessel.speed >= 0 && vessel.speed < 80
+      const cogValid = vessel.course != null && vessel.course >= 0 && vessel.course < 360
+      const speedMps = sogValid && cogValid ? vessel.speed * 0.514444 : 0
+      const courseDeg = cogValid ? vessel.course : 0
+
       if (existing.has(mmsi)) {
         const { billboard, label } = existing.get(mmsi)!
         if (interp) {
-          interp.updateTarget(`v-${mmsi}`, vessel.longitude, vessel.latitude, 0, billboard, label)
+          interp.updateTarget(`v-${mmsi}`, vessel.longitude, vessel.latitude, 0, billboard, label,
+            speedMps, courseDeg, 'deadreckon')
         } else {
           billboard.position = pos
           label.position = pos
@@ -1431,7 +1805,7 @@ function App() {
           id: entityId,
           horizontalOrigin: HorizontalOrigin.CENTER,
           verticalOrigin: VerticalOrigin.CENTER,
-          scaleByDistance: new NearFarScalar(1e3, 1.4, 8e6, 0.5),
+          scaleByDistance: new NearFarScalar(1e3, 1.2, 8e6, 0.22),
           translucencyByDistance: new NearFarScalar(5e5, 1.0, 1e7, 0.35),
         })
         const label = vl.add({
@@ -1449,8 +1823,14 @@ function App() {
           showBackground: true,
           backgroundColor: COL_BG,
           scaleByDistance: new NearFarScalar(1e3, 1.0, 3e6, 0.35),
+          // Hide vessel labels beyond 1,500 km — ports cluster thousands of ships
+          distanceDisplayCondition: new DistanceDisplayCondition(0, 1.5e6),
         })
         existing.set(mmsi, { billboard, label })
+        // Seed interp immediately so dead-reckoning (and camera tracking)
+        // works from first sighting instead of the second AIS report
+        interp?.updateTarget(`v-${mmsi}`, vessel.longitude, vessel.latitude, 0, billboard, label,
+          speedMps, courseDeg, 'deadreckon')
       }
     })
 
@@ -1483,7 +1863,12 @@ function App() {
     const ringImg = pulseRingImageRef.current
     const now = Date.now()
 
-    for (const evt of seismicEvents) {
+    // In playback mode, only show events that have occurred by the current playback time
+    const visibleEvents = playbackMode
+      ? seismicEvents.filter(evt => evt.time <= playbackTime)
+      : seismicEvents
+
+    for (const evt of visibleEvents) {
       const pos = Cartesian3.fromDegrees(evt.longitude, evt.latitude, 0)
       const mag = evt.magnitude
       const color = mag >= 5 ? COL_SEISMIC_HI : COL_SEISMIC_LO
@@ -1552,7 +1937,8 @@ function App() {
     }
 
     viewerRef.current?.scene.requestRender()
-  }, [seismicEvents])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seismicEvents, playbackMode, playbackMode && Math.floor(playbackTime / 30_000)])
 
   // ── Wildfire sync (billboards + labels) ──────────────────────────────────
   useEffect(() => {
@@ -1590,7 +1976,7 @@ function App() {
         id: { type: 'wildfire', key: fireKey },
         horizontalOrigin: HorizontalOrigin.CENTER,
         verticalOrigin: VerticalOrigin.CENTER,
-        scaleByDistance: new NearFarScalar(1e4, 1.2, 2e7, 0.5),
+        scaleByDistance: new NearFarScalar(1e4, 1.2, 2e7, 0.2),
         translucencyByDistance: new NearFarScalar(1e5, 1.0, 2e7, 0.25),
       })
       fireIndexMap.current.set(fireKey, billboard)
@@ -1643,16 +2029,24 @@ function App() {
     const existing = satIndexMap.current
     const incomingIds = new Set<string>()
     const interp = interpSystemRef.current
+    const hiddenCatalogs = useStore.getState().hiddenSatCatalogs
+    const KNOWN_CATALOGS = new Set(['notable','stations','visual','weather','earth-obs','navigation','geo','sarsat','relay','comms','amateur','science','military','engineering'])
 
     for (const sat of sats) {
       incomingIds.add(sat.id)
       const altM = sat.altitudeKm * 1000
       const pos = Cartesian3.fromDegrees(sat.longitude, sat.latitude, altM)
       const col = orbitColor(classifyOrbit(sat.altitudeKm))
+      // Hide if catalog is explicitly hidden, or if catalog is unknown and any filter is active
+      const visible = KNOWN_CATALOGS.has(sat.catalog)
+        ? !hiddenCatalogs.has(sat.catalog)
+        : hiddenCatalogs.size === 0
 
       if (existing.has(sat.id)) {
         // Update position + color in-place (no GPU buffer rebuild)
         const { billboard, label } = existing.get(sat.id)!
+        billboard.show = visible
+        label.show = visible && showLabels
         // Feed interpolation for smooth orbital movement
         if (interp) {
           interp.updateTarget(`s-${sat.id}`, sat.longitude, sat.latitude, altM, billboard, label)
@@ -1668,15 +2062,19 @@ function App() {
           position: pos,
           image: satImg,
           color: col,
+          show: visible,
           id: entityId,
           horizontalOrigin: HorizontalOrigin.CENTER,
           verticalOrigin: VerticalOrigin.CENTER,
-          scaleByDistance: new NearFarScalar(1e5, 2.0, 4e7, 1.0),
+          // Far scale kept small — 900 full-size sprites bury the globe at global
+          // zoom. Far bound 2.5e7 so the shrink fully engages by global altitude.
+          scaleByDistance: new NearFarScalar(1e5, 1.2, 2.5e7, 0.25),
           translucencyByDistance: new NearFarScalar(1e5, 1.0, 4e7, 0.85),
         })
         const label = satl.add({
           position: pos,
-          text: `SAT-${sat.id}`,
+          text: sat.name || `SAT-${sat.id}`,
+          show: visible && showLabels,
           font: 'bold 11px "JetBrains Mono", monospace',
           fillColor: col,
           id: entityId,
@@ -1690,6 +2088,7 @@ function App() {
           backgroundColor: COL_BG,
           scaleByDistance: new NearFarScalar(1e5, 1.2, 4e7, 0.6),
           translucencyByDistance: new NearFarScalar(1e5, 1.0, 4e7, 0.8),
+          distanceDisplayCondition: new DistanceDisplayCondition(0, 1.5e7), // hide labels beyond 15,000km
         })
         existing.set(sat.id, { billboard, label })
       }
@@ -1706,43 +2105,50 @@ function App() {
     }
 
     viewerRef.current?.scene.requestRender()
-  }, [sats])
+  }, [sats, hiddenSatCatalogs])
 
-  // ── Orbital path polylines (rebuild only when satellite set changes) ─────
-  const prevSatIdsRef = useRef<string>('__init__')
+  // ── Orbital path polylines ──────────────────────────────────────────────
+  const prevSatOrbitKeyRef = useRef<string>('')
   useEffect(() => {
     const viewer = viewerRef.current
     if (!viewer || viewer.isDestroyed()) return
 
-    // Helper: remove ALL tracked orbit primitives
+    // Helper: remove orbit primitive
     const removeOrbitPrim = () => {
       if (satOrbitPrimRef.current) {
-        try { viewer.scene.primitives.remove(satOrbitPrimRef.current) } catch { /* already removed */ }
+        try { viewer.scene.primitives.remove(satOrbitPrimRef.current) } catch { /* ok */ }
         satOrbitPrimRef.current = null
       }
     }
 
-    // If no satellites, always remove and bail
-    if (sats.length === 0) {
+    // If orbits toggled off, no satellites, or trails hidden in playback — remove and bail
+    if (!showSatOrbits || sats.length === 0 || (playbackMode && !showPlaybackTrails)) {
       removeOrbitPrim()
-      prevSatIdsRef.current = ''
+      prevSatOrbitKeyRef.current = ''
       viewer.scene.requestRender()
-      return removeOrbitPrim  // cleanup
+      return
     }
 
-    // Build a fingerprint of the current satellite set
-    const satIds = sats.filter(s => s.orbitSegments.length > 0).map(s => s.id).sort().join(',')
+    // Build a fingerprint: visible sats that have orbit data + hidden catalogs
+    const hiddenCats = useStore.getState().hiddenSatCatalogs
+    const KNOWN = new Set(['notable','stations','visual','weather','earth-obs','navigation','geo','sarsat','relay','comms','amateur','science','military','engineering'])
+    const visibleWithOrbits = sats.filter(s => {
+      if (s.orbitSegments.length === 0) return false
+      const vis = KNOWN.has(s.catalog) ? !hiddenCats.has(s.catalog) : hiddenCats.size === 0
+      return vis
+    })
+    const hiddenKey = Array.from(hiddenCats).sort().join('|')
+    const key = visibleWithOrbits.map(s => s.id).sort().join(',') + ':' + hiddenKey
 
-    // Skip rebuild if the set hasn't changed
-    if (satIds === prevSatIdsRef.current) return
-    prevSatIdsRef.current = satIds
+    // Skip rebuild if nothing changed
+    if (key === prevSatOrbitKeyRef.current) return
+    prevSatOrbitKeyRef.current = key
 
-    // Remove old orbit primitive first
+    // Remove old and rebuild
     removeOrbitPrim()
 
     const orbitInstances: GeometryInstance[] = []
-    for (const sat of sats) {
-      if (!sat.orbitSegments || sat.orbitSegments.length === 0) continue
+    for (const sat of visibleWithOrbits) {
       const col = orbitColor(classifyOrbit(sat.altitudeKm))
       for (const segment of sat.orbitSegments) {
         if (segment.length < 6) continue
@@ -1762,15 +2168,15 @@ function App() {
       const prim = new Primitive({
         geometryInstances: orbitInstances,
         appearance: new PolylineColorAppearance(),
-        asynchronous: false,  // synchronous to avoid stale primitive issues
+        asynchronous: false,
       })
       viewer.scene.primitives.add(prim)
       satOrbitPrimRef.current = prim
     }
 
     viewer.scene.requestRender()
-    return removeOrbitPrim  // cleanup on re-run or unmount
-  }, [sats])
+    // No cleanup return — we only remove on explicit rebuild or toggle-off
+  }, [sats, playbackMode, showPlaybackTrails, hiddenSatCatalogs, showSatOrbits])
 
   // ── Satellite ground footprint (coverage cone projected on surface) ──────
   const satFootprintRef = useRef<any>(null)  // CesiumJS Entity
@@ -1825,121 +2231,191 @@ function App() {
     viewer.scene.requestRender()
   }, [trackedEntity, sats])
 
-  // ── Air Quality sync ──────────────────────────────────────────────────────
+  // ── Satellite ground projection cone lines (curved spokes) ─────────────
   useEffect(() => {
-    const aqp = aqPointsRef.current
-    const aql = aqLabelsRef.current
-    if (!aqp || !aql) return
+    const viewer = viewerRef.current
+    const projLines = satProjectionLinesRef.current
+    if (!viewer || viewer.isDestroyed() || !projLines) return
 
-    aqp.removeAll()
-    aql.removeAll()
+    const prevMap = satProjectionIndexMap.current
 
-    for (const station of airQuality) {
-      const pos = Cartesian3.fromDegrees(station.longitude, station.latitude, 0)
-      const color = Color.fromCssColorString(
-        station.aqi <= 50  ? '#36D977' :
-        station.aqi <= 100 ? '#D4A017' :
-        station.aqi <= 150 ? '#D97736' :
-        station.aqi <= 200 ? '#DD4444' :
-        station.aqi <= 300 ? '#9966FF' : '#7E0023'
-      )
-      const size = Math.min(4 + station.aqi / 30, 14)
-
-      aqp.add({
-        position: pos,
-        color,
-        pixelSize: size,
-        id: { type: 'airq', key: String(station.id) },
-        outlineColor: Color.BLACK,
-        outlineWidth: 1,
-        scaleByDistance: new NearFarScalar(1e4, 1.5, 2e7, 0.6),
-      })
-
-      aql.add({
-        position: pos,
-        text: `AQI ${station.aqi}`,
-        font: 'bold 11px "JetBrains Mono", monospace',
-        fillColor: color,
-        id: { type: 'airq', key: String(station.id) },
-        style: LabelStyle.FILL_AND_OUTLINE,
-        outlineWidth: 3,
-        outlineColor: Color.BLACK,
-        horizontalOrigin: HorizontalOrigin.LEFT,
-        verticalOrigin: VerticalOrigin.CENTER,
-        pixelOffset: new Cartesian2(10, 0),
-        showBackground: true,
-        backgroundColor: COL_BG,
-        scaleByDistance: new NearFarScalar(1e4, 1.0, 1e7, 0.4),
-        translucencyByDistance: new NearFarScalar(1e4, 1.0, 2e7, 0.0),
-      })
+    if (!showSatProjections || !activeLayers.includes('satellites') || sats.length === 0) {
+      projLines.removeAll()
+      prevMap.clear()
+      viewer.scene.requestRender()
+      return
     }
 
-    viewerRef.current?.scene.requestRender()
+    const hiddenCats = useStore.getState().hiddenSatCatalogs
+    const KNOWN = new Set(['notable','stations','visual','weather','earth-obs','navigation','geo','sarsat','relay','comms','amateur','science','military','engineering'])
+
+    const Re = 6_371_000
+    const SPOKES = 14
+    const ARC_SEGMENTS = 16  // points per spoke for smooth curvature
+    const CAP = 120
+
+    const visibleSats = sats.filter(s => {
+      return KNOWN.has(s.catalog) ? !hiddenCats.has(s.catalog) : hiddenCats.size === 0
+    }).slice(0, CAP)
+    const currentIds = new Set<string>()
+
+    // Build curved arc: tight at satellite, fans out toward ground (like water from a hose)
+    const buildArc = (
+      satLon: number, satLat: number, h: number,
+      groundLon: number, groundLat: number
+    ): Cartesian3[] => {
+      const pts: Cartesian3[] = []
+      for (let s = 0; s <= ARC_SEGMENTS; s++) {
+        const t = s / ARC_SEGMENTS  // 0 = satellite, 1 = ground
+        // Cubic spread: spokes stay bundled near sat, fan out toward ground
+        const spread = t * t * t
+        const lat = satLat + spread * (groundLat - satLat)
+        const lon = satLon + spread * (groundLon - satLon)
+        // Altitude drops linearly from h to 0 with a gentle outward bow
+        const alt = h * (1 - t) + h * 0.08 * Math.sin(Math.PI * t)
+        pts.push(Cartesian3.fromDegrees(lon, lat, Math.max(alt, 0)))
+      }
+      return pts
+    }
+
+    for (const sat of visibleSats) {
+      currentIds.add(sat.id)
+      const h = sat.altitudeKm * 1000
+      const minElev = 5 * Math.PI / 180
+      const centralAngle = Math.acos(Re * Math.cos(minElev) / (Re + h)) - minElev
+      if (centralAngle <= 0 || isNaN(centralAngle)) continue
+
+      const footprintRadiusDeg = centralAngle * (180 / Math.PI)
+      const col = orbitColor(classifyOrbit(sat.altitudeKm))
+
+      const existing = prevMap.get(sat.id)
+      if (existing) {
+        for (let i = 0; i < SPOKES; i++) {
+          const angle = (2 * Math.PI * i) / SPOKES
+          const groundLat = sat.latitude + footprintRadiusDeg * Math.cos(angle)
+          const groundLon = sat.longitude + footprintRadiusDeg * Math.sin(angle) / Math.cos(sat.latitude * Math.PI / 180)
+          if (existing[i]) existing[i].positions = buildArc(sat.longitude, sat.latitude, h, groundLon, groundLat)
+        }
+      } else {
+        const lines: any[] = []
+        for (let i = 0; i < SPOKES; i++) {
+          const angle = (2 * Math.PI * i) / SPOKES
+          const groundLat = sat.latitude + footprintRadiusDeg * Math.cos(angle)
+          const groundLon = sat.longitude + footprintRadiusDeg * Math.sin(angle) / Math.cos(sat.latitude * Math.PI / 180)
+          const line = projLines.add({
+            positions: buildArc(sat.longitude, sat.latitude, h, groundLon, groundLat),
+            width: 1.5,
+            material: Material.fromType('PolylineGlow', {
+              glowPower: 0.12,
+              taperPower: 0.7,
+              color: col.withAlpha(0.45),
+            }),
+          })
+          lines.push(line)
+        }
+        prevMap.set(sat.id, lines)
+      }
+    }
+
+    // Remove departed / filtered sats
+    for (const [id, lines] of prevMap) {
+      if (!currentIds.has(id)) {
+        for (const l of lines) projLines.remove(l)
+        prevMap.delete(id)
+      }
+    }
+
+    viewer.scene.requestRender()
+  }, [sats, showSatProjections, activeLayers, hiddenSatCatalogs])
+
+  // ── Air Quality heatmap overlay ──────────────────────────────────────────
+  // Ramp maps normalized AQI (0-1) → color. Each point painted as its own color.
+  const AQ_RAMP: ColorRampStop[] = [
+    [0.0,  0x36, 0xD9, 0x77, 140],  // good — green
+    [0.33, 0xD4, 0xA0, 0x17, 170],  // moderate — amber
+    [0.50, 0xD9, 0x77, 0x36, 190],  // unhealthy-sensitive — orange
+    [0.67, 0xDD, 0x44, 0x44, 210],  // unhealthy — red
+    [0.83, 0x99, 0x66, 0xFF, 230],  // very unhealthy — purple
+    [1.0,  0x7E, 0x00, 0x23, 255],  // hazardous — maroon
+  ]
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer || viewer.isDestroyed()) return
+
+    if (!aqHeatmapRef.current) {
+      // radius 25 ≈ 4.4° lon — tight splats since stations are dense in Europe/US
+      aqHeatmapRef.current = new HeatmapLayer(viewer, { radius: 25, colorRamp: AQ_RAMP, opacity: 0.55, minVisibleHeight: 150_000 })
+    }
+
+    if (airQuality.length === 0) {
+      aqHeatmapRef.current.destroy()
+      aqHeatmapRef.current = null
+      return
+    }
+
+    // Map AQI 0-300 → 0-1 (300+ is rare, clamp to 1)
+    aqHeatmapRef.current.update(
+      airQuality.map(s => ({ lat: s.latitude, lon: s.longitude, value: Math.min(s.aqi / 300, 1) }))
+    )
+
+    return () => { aqHeatmapRef.current?.destroy(); aqHeatmapRef.current = null }
   }, [airQuality])
 
-  // ── Weather sync ─────────────────────────────────────────────────────────
+  // ── Weather heatmap overlay ──────────────────────────────────────────────
+  // NWS radar reflectivity color scale — high contrast against ocean.
+  // Only shows precipitation events (drizzle, rain, snow, showers, thunderstorms).
+  const WX_RAMP: ColorRampStop[] = [
+    [0.0,  0x77, 0xDD, 0x77, 160],  // drizzle — light green
+    [0.15, 0x22, 0x99, 0x22, 180],  // light rain — dark green
+    [0.30, 0xFF, 0xFF, 0x33, 190],  // moderate rain — yellow
+    [0.50, 0xFF, 0xAA, 0x22, 200],  // heavy rain — orange
+    [0.70, 0xFF, 0x33, 0x33, 210],  // very heavy rain — red
+    [0.85, 0xDD, 0x44, 0xDD, 220],  // severe storms — purple/magenta
+    [1.0,  0xBB, 0xCC, 0xFF, 200],  // snow/ice — blue-white
+  ]
   useEffect(() => {
-    const wxp = weatherPointsRef.current
-    const wxl = weatherLabelsRef.current
-    if (!wxp || !wxl) return
+    const viewer = viewerRef.current
+    if (!viewer || viewer.isDestroyed()) return
 
-    wxp.removeAll()
-    wxl.removeAll()
-
-    for (const wp of weather) {
-      const pos = Cartesian3.fromDegrees(wp.longitude, wp.latitude, 0)
-      const color = Color.fromCssColorString(
-        wp.weatherCode === 0 ? '#6699FF' :
-        wp.weatherCode <= 3  ? '#8899AA' :
-        wp.weatherCode <= 49 ? '#AABBCC' :
-        wp.weatherCode <= 69 ? '#3388DD' :
-        wp.weatherCode <= 79 ? '#CCDDFF' :
-        wp.weatherCode <= 86 ? '#99AADD' :
-        wp.weatherCode <= 99 ? '#FFD700' : '#6699FF'
-      )
-
-      const label =
-        wp.weatherCode === 0 ? 'CLR' :
-        wp.weatherCode <= 3  ? 'CLD' :
-        wp.weatherCode <= 49 ? 'FOG' :
-        wp.weatherCode <= 69 ? 'RN'  :
-        wp.weatherCode <= 79 ? 'SN'  :
-        wp.weatherCode <= 86 ? 'SHW' :
-        wp.weatherCode <= 99 ? 'TS'  : '?'
-
-      const temp = Math.round(wp.temperature)
-      const wind = Math.round(wp.windSpeed)
-
-      wxp.add({
-        position: pos,
-        color,
-        pixelSize: 6,
-        id: { type: 'weather', key: wp.id },
-        outlineColor: Color.BLACK,
-        outlineWidth: 1,
-        scaleByDistance: new NearFarScalar(5e5, 1.5, 2e7, 0.8),
-      })
-
-      wxl.add({
-        position: pos,
-        text: `${temp}° ${label} ${wind}kh`,
-        font: 'bold 11px "JetBrains Mono", monospace',
-        fillColor: color,
-        id: { type: 'weather', key: wp.id },
-        style: LabelStyle.FILL_AND_OUTLINE,
-        outlineWidth: 3,
-        outlineColor: Color.BLACK,
-        horizontalOrigin: HorizontalOrigin.LEFT,
-        verticalOrigin: VerticalOrigin.CENTER,
-        pixelOffset: new Cartesian2(10, 0),
-        showBackground: true,
-        backgroundColor: COL_BG,
-        scaleByDistance: new NearFarScalar(5e5, 1.0, 1e7, 0.4),
-        translucencyByDistance: new NearFarScalar(5e5, 1.0, 2e7, 0.0),
-      })
+    if (!wxHeatmapRef.current) {
+      // radius 45 ≈ 8° lon — overlaps nicely at 10°×15° dense grid spacing
+      wxHeatmapRef.current = new HeatmapLayer(viewer, { radius: 45, colorRamp: WX_RAMP, opacity: 0.55, minVisibleHeight: 150_000 })
     }
 
-    viewerRef.current?.scene.requestRender()
+    if (weather.length === 0) {
+      wxHeatmapRef.current.destroy()
+      wxHeatmapRef.current = null
+      return
+    }
+
+    // Map WMO codes to NWS reflectivity scale. Skip clear/cloudy/fog.
+    const normalizeWx = (code: number): number =>
+      code <= 49  ? -1 :      // clear/cloudy/fog — skip
+      code <= 55  ? 0.0 :     // light drizzle — light green
+      code <= 59  ? 0.15 :    // dense drizzle — dark green
+      code <= 63  ? 0.30 :    // moderate rain — yellow
+      code <= 65  ? 0.50 :    // heavy rain — orange
+      code <= 69  ? 0.70 :    // freezing rain — red
+      code <= 79  ? 1.0 :     // snow — blue-white
+      code <= 82  ? 0.30 :    // light showers — yellow
+      code <= 84  ? 0.50 :    // heavy showers — orange
+      code <= 86  ? 1.0 :     // snow showers — blue-white
+      code <= 95  ? 0.70 :    // thunderstorm — red
+      code <= 99  ? 0.85 : -1 // severe thunderstorm w/ hail — magenta
+
+    const pts = weather
+      .filter(w => normalizeWx(w.weatherCode) >= 0)
+      .map(w => ({ lat: w.latitude, lon: w.longitude, value: normalizeWx(w.weatherCode) }))
+
+    if (pts.length === 0) {
+      wxHeatmapRef.current.destroy()
+      wxHeatmapRef.current = null
+      return
+    }
+
+    wxHeatmapRef.current.update(pts)
+
+    return () => { wxHeatmapRef.current?.destroy(); wxHeatmapRef.current = null }
   }, [weather])
 
   // ── Night Lights toggle (NASA GIBS WMTS) ────────────────────────────────
@@ -1949,16 +2425,14 @@ function App() {
     if (!viewer || viewer.isDestroyed()) return
 
     if (wantNightLights && !nightLightsLayerRef.current) {
-      const provider = new WebMapTileServiceImageryProvider({
-        url: 'https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/VIIRS_Black_Marble/default/2016-01-01/500m/{TileMatrix}/{TileRow}/{TileCol}.png',
-        layer: 'VIIRS_Black_Marble',
-        style: 'default',
-        tileMatrixSetID: '500m',
-        format: 'image/png',
+      const provider = new UrlTemplateImageryProvider({
+        url: 'https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/VIIRS_Black_Marble/default/2016-01-01/500m/{z}/{y}/{x}.png',
+        minimumLevel: 0,
         maximumLevel: 8,
         tilingScheme: new GeographicTilingScheme(),
-        credit: 'NASA GIBS',
-      } as any)
+        hasAlphaChannel: true,
+        credit: 'NASA GIBS VIIRS Black Marble',
+      })
 
       const layer = new ImageryLayer(provider, {
         alpha: 0.75,
@@ -1973,70 +2447,44 @@ function App() {
     }
   }, [wantNightLights])
 
-  // ── GPS Jamming heatmap (H3 hexagon polygons) ───────────────────────────
+  // ── GPS Jamming heatmap overlay ─────────────────────────────────────────
+  // interferenceRatio 0.02-1.0 mapped to ramp. Cells already filtered (ratio ≥ 0.02).
+  const GPS_RAMP: ColorRampStop[] = [
+    [0.0,  0x33, 0xFF, 0x33, 120],  // green — low interference
+    [0.33, 0xFF, 0xFF, 0x33, 160],  // yellow — moderate
+    [0.66, 0xFF, 0x66, 0x33, 200],  // orange — high
+    [1.0,  0xFF, 0x33, 0x33, 240],  // red — severe
+  ]
   useEffect(() => {
     const viewer = viewerRef.current
     if (!viewer || viewer.isDestroyed()) return
 
-    // Remove previous primitive
-    if (gpsJamPrimRef.current) {
-      viewer.scene.primitives.remove(gpsJamPrimRef.current)
-      gpsJamPrimRef.current = null
+    if (!gpsJamHeatmapRef.current) {
+      // radius 15 — H3 res-4 cells are small, keep splats tight
+      gpsJamHeatmapRef.current = new HeatmapLayer(viewer, { radius: 15, colorRamp: GPS_RAMP, opacity: 0.6, minVisibleHeight: 100_000 })
     }
 
     if (gpsJam.length === 0) {
+      gpsJamHeatmapRef.current.destroy()
+      gpsJamHeatmapRef.current = null
       viewer.scene.requestRender()
       return
     }
 
-    const instances: GeometryInstance[] = []
-    for (const cell of gpsJam) {
-      // cell.boundary is [[lat, lon], ...] — convert to Cartesian3 ring
-      const positions = cell.boundary.map(([lat, lon]) =>
-        Cartesian3.fromDegrees(lon, lat)
-      )
-      if (positions.length < 3) continue
-
-      // Color by interference level
-      const ratio = cell.interferenceRatio
-      let color: Color
-      if (ratio < 0.10) {
-        color = Color.fromCssColorString('#33ff33').withAlpha(0.25)  // green — low
-      } else if (ratio < 0.30) {
-        color = Color.fromCssColorString('#ffff33').withAlpha(0.35)  // yellow — medium
-      } else {
-        color = Color.fromCssColorString('#ff3333').withAlpha(0.45)  // red — high
-      }
-
-      instances.push(new GeometryInstance({
-        geometry: new PolygonGeometry({
-          polygonHierarchy: new PolygonHierarchy(positions),
-        }),
-        attributes: {
-          color: ColorGeometryInstanceAttribute.fromColor(color),
-        },
-        id: { type: 'gpsjam', key: cell.h3Index },
-      }))
-    }
-
-    if (instances.length > 0) {
-      const prim = new Primitive({
-        geometryInstances: instances,
-        appearance: new PerInstanceColorAppearance({
-          flat: true,
-          translucent: true,
-        }),
-        asynchronous: true,
+    // Compute centroid; scale ratio 0.02-0.5 → 0-1 (most cells < 0.5)
+    gpsJamHeatmapRef.current.update(
+      gpsJam.map(cell => {
+        const b = cell.boundary
+        const lat = b.reduce((s, p) => s + p[0], 0) / b.length
+        const lon = b.reduce((s, p) => s + p[1], 0) / b.length
+        return { lat, lon, value: Math.min(cell.interferenceRatio / 0.5, 1) }
       })
-      viewer.scene.primitives.add(prim)
-      gpsJamPrimRef.current = prim as any
-    }
+    )
 
-    viewer.scene.requestRender()
+    return () => { gpsJamHeatmapRef.current?.destroy(); gpsJamHeatmapRef.current = null }
   }, [gpsJam])
 
   const cleanUI = useStore((s) => s.cleanUI)
-  const playbackMode = useStore((s) => s.playbackMode)
 
   const handleGpsNavigate = (lat: number, lon: number, alt?: number) => {
     const viewer = viewerRef.current
@@ -2077,15 +2525,55 @@ function App() {
       {/* Right sidebar — in dark margin */}
       {!cleanUI && <SidebarRight />}
 
+      {/* Intel feed + Satellite panel — top-right */}
+      {!cleanUI && (
+        <div className="absolute top-3 right-3 z-30 pointer-events-auto w-[200px] max-h-[90vh] overflow-y-auto no-scrollbar">
+          <IntelFeed
+            flights={flights}
+            militaryFlights={militaryFlights}
+            vessels={vessels}
+            seismicEvents={seismicEvents}
+            sats={sats}
+            wildfires={wildfires}
+          />
+          <SatellitePanel />
+        </div>
+      )}
+
       {/* Bottom controls — swap between live and playback bars */}
       {!cleanUI && !playbackMode && <LocationsBar />}
-      {!cleanUI && !playbackMode && <StylePresetsBar />}
+      {!cleanUI && <StylePresetsBar />}
       {!cleanUI && playbackMode && <PlaybackBar />}
 
       {cleanUI && <CleanUIToggle />}
       <GpsModal onNavigate={handleGpsNavigate} />
-      {cctvViewerFeed && (
-        <CCTVViewer feed={cctvViewerFeed} onClose={() => setCctvViewerFeed(null)} />
+      {trackedEntity && (
+        <EntityTrackingPanel
+          trackedEntity={trackedEntity}
+          flightsRef={flightsRef}
+          milFlightsRef={milFlightsRef}
+          satsDataRef={satsDataRef}
+          vesselsRef={vesselsRef}
+        />
+      )}
+      {wantCctv && (
+        <CCTVPanel
+          cameras={cctvCameras}
+          totalOnline={totalOnline}
+          totalCameras={totalCameras}
+          availableCountries={availableCountries}
+          onFlyTo={(cam: CameraFeed) => {
+            const v = viewerRef.current
+            if (!v) return
+            v.camera.flyTo({
+              destination: Cartesian3.fromDegrees(cam.longitude, cam.latitude, 2000),
+              orientation: { heading: 0, pitch: CesiumMath.toRadians(-45), roll: 0 },
+              duration: 2.0,
+            })
+            useStore.getState().setSelectedCameraId(cam.id)
+            useStore.getState().setSelectedEntity({ type: 'cctv', data: cam })
+          }}
+        />
       )}
     </div>
   )

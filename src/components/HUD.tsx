@@ -24,6 +24,31 @@ function toMGRSString(lat: number, lon: number): string {
   }
 }
 
+/**
+ * Solar elevation angle (degrees) for a given time and position.
+ * NOAA simplified algorithm — accurate to ~0.1°, plenty for a HUD readout.
+ */
+function sunElevation(date: Date, lat: number, lon: number): number {
+  const rad = Math.PI / 180
+  const dayMs = 86_400_000
+  const julianDay = date.getTime() / dayMs + 2440587.5
+  const d = julianDay - 2451545.0
+  const g = (357.529 + 0.98560028 * d) * rad          // mean anomaly
+  const q = 280.459 + 0.98564736 * d                  // mean longitude
+  const L = (q + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)) * rad // ecliptic long
+  const e = (23.439 - 0.00000036 * d) * rad           // obliquity
+  const decl = Math.asin(Math.sin(e) * Math.sin(L))
+  const ra = Math.atan2(Math.cos(e) * Math.sin(L), Math.cos(L))
+  const gmst = (18.697374558 + 24.06570982441908 * d) % 24
+  const lst = gmst + lon / 15
+  const ha = (lst * 15 * rad) - ra                    // hour angle
+  const elev = Math.asin(
+    Math.sin(lat * rad) * Math.sin(decl) +
+    Math.cos(lat * rad) * Math.cos(decl) * Math.cos(ha)
+  )
+  return elev / rad
+}
+
 /** Format MGRS with spaces: "10S EG 5078 8604" */
 function formatMGRS(mgrs: string): string {
   if (!mgrs || mgrs === '—') return '—'
@@ -44,10 +69,22 @@ export function HUD() {
   const cleanUI = useStore((s) => s.cleanUI)
   const cursorGeo = useStore((s) => s.cursorGeo)
   const cameraHeight = useStore((s) => s.cameraHeight)
+  const cameraBbox = useStore((s) => s.cameraBbox)
 
   if (cleanUI) return null
 
   const utcNow = new Date().toISOString().slice(11, 19) + 'Z'
+
+  // Derived sensor readouts — real values, not set dressing.
+  // GSD ≈ ground metres per screen pixel at nadir (height × pixel angular size)
+  const gsdM = Math.max(0.05, cameraHeight / 1_000)
+  const gsdStr = gsdM >= 1000 ? `${(gsdM / 1000).toFixed(1)}KM` : gsdM >= 1 ? `${gsdM.toFixed(1)}M` : `${(gsdM * 100).toFixed(0)}CM`
+  // NIIRS from GSD via simplified GIQE: NIIRS ≈ 5 − 3.32·log10(GSD_m)
+  const niirs = Math.max(0, Math.min(9, 5 - 3.32 * Math.log10(gsdM))).toFixed(1)
+  // Sun elevation at camera sub-point
+  const camLat = cameraBbox ? (cameraBbox[0] + cameraBbox[2]) / 2 : 0
+  const camLon = cameraBbox ? (cameraBbox[1] + cameraBbox[3]) / 2 : 0
+  const sunEl = sunElevation(new Date(), camLat, camLon).toFixed(1)
 
   // Format cursor position
   const cursorDMS = cursorGeo
@@ -57,12 +94,12 @@ export function HUD() {
     ? formatMGRS(toMGRSString(cursorGeo.lat, cursorGeo.lon))
     : null
 
-  // Format camera altitude
-  const altStr = cameraHeight >= 1_000_000
-    ? `${(cameraHeight / 1_000_000).toFixed(1)}M`
+  // Format camera altitude with unit
+  const altStr = cameraHeight >= 10_000
+    ? `${Math.round(cameraHeight / 1_000).toLocaleString()}KM`
     : cameraHeight >= 1_000
-      ? `${(cameraHeight / 1_000).toFixed(1)}K`
-      : `${Math.round(cameraHeight)}`
+      ? `${(cameraHeight / 1_000).toFixed(1)}KM`
+      : `${Math.round(cameraHeight)}M`
 
   return (
     <>
@@ -86,7 +123,7 @@ export function HUD() {
               </div>
               <h1 className="text-lg font-bold tracking-[0.35em] text-worldview-text-bright">W O R L D V I E W</h1>
             </div>
-            <div className="text-[8px] text-[#4a6385] tracking-[0.25em] uppercase ml-6 mb-4">NO PLACE LEFT BEHIND</div>
+            <div className="text-[8px] text-[#555555] tracking-[0.25em] uppercase ml-6 mb-4">NO PLACE LEFT BEHIND</div>
             <div className="space-y-1">
               <div className="text-worldview-orange font-bold tracking-widest text-[9px]">TOP SECRET // SI-TK // NOFORN</div>
               <div className="text-[#607b9e] text-[9px] flex gap-2 font-mono">
@@ -99,13 +136,13 @@ export function HUD() {
 
           {/* Top Center — link icon */}
           <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
-            <Link2 className="w-4 h-4 text-[#4a6385] -rotate-45" />
+            <Link2 className="w-4 h-4 text-[#555555] -rotate-45" />
           </div>
 
           {/* Top Right Stats/Active Mode */}
           <div className="absolute top-3 right-3 z-20 text-right pointer-events-none flex flex-col items-end">
             <div className="flex items-center gap-2 mb-3">
-              <span className="text-[8px] text-[#4a6385] tracking-widest uppercase">ACTIVE STYLE</span>
+              <span className="text-[8px] text-[#555555] tracking-widest uppercase">ACTIVE STYLE</span>
             </div>
             <div className="text-glow-cyan font-bold tracking-[0.25em] uppercase text-base mb-3">{activeMode}</div>
             <div className="pr-0 py-1 border-r-2 border-r-worldview-orange pl-4">
@@ -117,27 +154,23 @@ export function HUD() {
             </div>
           </div>
 
-          {/* Bottom Left — Cursor GPS coordinates */}
-          <div className="absolute bottom-[165px] left-[230px] z-20 pointer-events-none space-y-0.5">
-            {cursorGeo ? (
-              <>
-                <div className="text-[9px] text-worldview-orange font-mono tracking-wider flex items-start gap-1">
-                  <span className="text-[#4a6385]">┗</span>
-                  <div>
-                    <div>MGRS: <span className="font-bold">{cursorMGRS}</span></div>
-                    <div className="ml-[2ch]">{cursorDMS}</div>
-                  </div>
+          {/* Bottom Left — Cursor GPS coordinates (screen corner, clear of LocationsBar/legend) */}
+          <div className="absolute bottom-3 left-3 z-20 pointer-events-none space-y-0.5">
+            {cursorGeo && (
+              <div className="text-[9px] text-worldview-orange font-mono tracking-wider flex items-start gap-1">
+                <span className="text-[#555555]">┗</span>
+                <div>
+                  <div>MGRS: <span className="font-bold">{cursorMGRS}</span></div>
+                  <div className="ml-[2ch]">{cursorDMS}</div>
                 </div>
-              </>
-            ) : (
-              <div className="text-[9px] text-[#4a6385] font-mono tracking-wider">NIIRS: <span className="text-worldview-orange">0.0</span></div>
+              </div>
             )}
           </div>
 
-          {/* Bottom Right Stats */}
-          <div className="absolute bottom-[165px] right-[230px] z-20 pointer-events-none text-right space-y-0.5">
-            <div className="text-[9px] text-[#4a6385] font-mono tracking-wider">GSD: 1399.31M NIIRS: <span className="text-worldview-orange">0.0</span></div>
-            <div className="text-[9px] text-[#4a6385] font-mono tracking-wider">ALT: {altStr}M SUN: <span className="text-worldview-orange">-42.8° EL</span></div>
+          {/* Bottom Right Stats — derived from camera state */}
+          <div className="absolute bottom-3 right-3 z-20 pointer-events-none text-right space-y-0.5">
+            <div className="text-[9px] text-[#555555] font-mono tracking-wider">GSD: <span className="text-worldview-text-bright">{gsdStr}</span> NIIRS: <span className="text-worldview-orange">{niirs}</span></div>
+            <div className="text-[9px] text-[#555555] font-mono tracking-wider">ALT: {altStr} SUN: <span className="text-worldview-orange">{sunEl}° EL</span></div>
           </div>
         </>
       )}
@@ -145,8 +178,8 @@ export function HUD() {
       {/* Full only: camera altitude readout */}
       {hudLayout === 'Full' && (
         <div className="absolute bottom-[165px] left-1/2 -translate-x-1/2 z-20 pointer-events-none">
-          <div className="text-[8px] text-[#4a6385] font-mono tracking-wider">
-            CAM ALT: <span className="text-worldview-cyan">{altStr}M</span> |
+          <div className="text-[8px] text-[#555555] font-mono tracking-wider">
+            CAM ALT: <span className="text-worldview-cyan">{altStr}</span> |
             LAT: <span className="text-worldview-text-bright">{cursorGeo?.lat.toFixed(4) ?? '--'}</span> |
             LON: <span className="text-worldview-text-bright">{cursorGeo?.lon.toFixed(4) ?? '--'}</span>
           </div>

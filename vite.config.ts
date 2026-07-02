@@ -3,17 +3,19 @@ import react from '@vitejs/plugin-react'
 import cesium from 'vite-plugin-cesium'
 import tailwindcss from '@tailwindcss/vite'
 import aisWebSocketProxy from './vite-plugin-ais-proxy'
+import spaceTrackProxy from './vite-plugin-spacetrack-proxy'
+import cctvProxy from './vite-plugin-cctv-proxy'
 
 export default defineConfig(({ mode }) => {
   // Load .env / .env.local so process.env.VITE_* is available in proxy callbacks
   const env = loadEnv(mode, process.cwd(), '')
 
   return {
-    plugins: [react(), cesium(), tailwindcss(), aisWebSocketProxy()],
+    plugins: [react(), cesium(), tailwindcss(), aisWebSocketProxy(), spaceTrackProxy(), cctvProxy()],
     server: {
       proxy: {
         '/adsbfi': {
-          target: 'https://api.adsb.fi',
+          target: 'https://opendata.adsb.fi',
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/adsbfi/, ''),
         },
@@ -38,11 +40,27 @@ export default defineConfig(({ mode }) => {
             })
           },
         },
-        // OpenSky OAuth2 token endpoint (proxied to avoid CORS on localhost)
+        // OpenSky OAuth2 token endpoint — credentials injected server-side
         '/opensky-token': {
           target: 'https://auth.opensky-network.org',
           changeOrigin: true,
           rewrite: () => '/auth/realms/opensky-network/protocol/openid-connect/token',
+          configure: (proxy: any) => {
+            const clientId = env.OPENSKY_CLIENT_ID ?? env.VITE_OPENSKY_CLIENT_ID ?? ''
+            const clientSecret = env.OPENSKY_CLIENT_SECRET ?? env.VITE_OPENSKY_CLIENT_SECRET ?? ''
+            proxy.on('proxyReq', (proxyReq: any, req: any) => {
+              if (req.method === 'POST' && clientId && clientSecret) {
+                const body = new URLSearchParams({
+                  grant_type: 'client_credentials',
+                  client_id: clientId,
+                  client_secret: clientSecret,
+                }).toString()
+                proxyReq.setHeader('Content-Type', 'application/x-www-form-urlencoded')
+                proxyReq.setHeader('Content-Length', Buffer.byteLength(body))
+                proxyReq.write(body)
+              }
+            })
+          },
         },
         // n2yo.com satellite API
         '/n2yo': {
@@ -56,21 +74,7 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/gpsjam/, ''),
         },
-        // Windy Webcams API — inject API key server-side
-        '/windy': {
-          target: 'https://api.windy.com',
-          changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/windy/, ''),
-          configure: (proxy) => {
-            const key = env.VITE_WINDY_WEBCAMS_KEY ?? ''
-            proxy.on('proxyReq', (proxyReq) => {
-              if (key) proxyReq.setHeader('x-windy-api-key', key)
-              // Remove origin/referer so Windy sees server-to-server (no domain restriction)
-              proxyReq.removeHeader('origin')
-              proxyReq.removeHeader('referer')
-            })
-          },
-        },
+        // CCTV is handled by vite-plugin-cctv-proxy (custom middleware)
         // Google Map Tiles API (traffic overlay + data sampling)
         '/gmap-tiles': {
           target: 'https://tile.googleapis.com',

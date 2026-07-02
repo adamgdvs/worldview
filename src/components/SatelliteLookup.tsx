@@ -64,7 +64,7 @@ export function SatelliteLookup({ onSelect }: SatelliteLookupProps) {
           onChange={(e) => { setQuery(e.target.value); setError('') }}
           onKeyDown={handleKeyDown}
           placeholder="NORAD ID or name..."
-          className="flex-1 bg-[#0a1628] border border-worldview-border/40 text-[9px] text-worldview-text-bright px-2 py-1 font-mono placeholder:text-[#304c78] focus:border-worldview-cyan/50 focus:outline-none transition-colors min-w-0"
+          className="flex-1 bg-[#111111] border border-worldview-border/40 text-[9px] text-worldview-text-bright px-2 py-1 font-mono placeholder:text-[#333333] focus:border-worldview-cyan/50 focus:outline-none transition-colors min-w-0"
         />
         <button
           onClick={handleFetch}
@@ -83,7 +83,7 @@ export function SatelliteLookup({ onSelect }: SatelliteLookupProps) {
               onClick={() => { onSelect(r.id); setQuery(''); setResults([]) }}
               className="w-full text-left px-1.5 py-0.5 text-[8px] font-mono text-worldview-text-bright hover:bg-worldview-cyan/10 hover:text-worldview-cyan transition-colors truncate"
             >
-              <span className="text-[#5a7a9a]">{r.id}</span> {r.name}
+              <span className="text-[#666666]">{r.id}</span> {r.name}
             </button>
           ))}
         </div>

@@ -1,5 +1,6 @@
 // Open-Meteo API — no API key required
-// Fetches current weather for a grid of points around the globe
+// https://open-meteo.com/en/docs
+// Fetches current weather for a dense global grid (~350 points, 10°×15° spacing)
 
 export interface WeatherPoint {
   id: string
@@ -40,11 +41,12 @@ export function weatherColor(code: number): string {
   return '#6699FF'
 }
 
-// Grid of world lat/lon points for sampling weather data
-function generateWorldGrid(latStep = 20, lonStep = 30): Array<{ lat: number; lon: number }> {
+// Dense global grid: 10° lat × 15° lon = ~350 points
+// Covers -60 to 70 lat (avoids Antarctica), -180 to 180 lon
+function generateWorldGrid(): Array<{ lat: number; lon: number }> {
   const points: Array<{ lat: number; lon: number }> = []
-  for (let lat = -60; lat <= 70; lat += latStep) {
-    for (let lon = -170; lon <= 170; lon += lonStep) {
+  for (let lat = -60; lat <= 70; lat += 10) {
+    for (let lon = -180; lon <= 180; lon += 15) {
       points.push({ lat, lon })
     }
   }
@@ -52,67 +54,101 @@ function generateWorldGrid(latStep = 20, lonStep = 30): Array<{ lat: number; lon
 }
 
 /**
- * Fetch current weather for a global grid of points.
- * Uses individual requests per point to avoid URL length issues.
- * Fetches in parallel with concurrency limit.
+ * Fetch a single batch of locations from Open-Meteo.
+ * Returns parsed WeatherPoints or empty array on failure.
  */
-export async function fetchWeather(): Promise<WeatherPoint[]> {
-  const grid = generateWorldGrid(20, 30)  // ~84 points (coarser grid for reliability)
+async function fetchBatch(
+  batch: Array<{ lat: number; lon: number }>,
+  signal: AbortSignal,
+): Promise<WeatherPoint[]> {
+  const lats = batch.map(p => p.lat).join(',')
+  const lons = batch.map(p => p.lon).join(',')
+  const url =
+    `https://api.open-meteo.com/v1/forecast` +
+    `?latitude=${lats}&longitude=${lons}` +
+    `&current=temperature_2m,wind_speed_10m,wind_direction_10m,weather_code,is_day,precipitation,cloud_cover` +
+    `&forecast_days=1`
+
+  const res = await fetch(url, { signal })
+  if (!res.ok) {
+    console.warn(`[Weather] HTTP ${res.status}`)
+    return []
+  }
+
+  const data = await res.json()
+  const entries = Array.isArray(data) ? data : [data]
   const results: WeatherPoint[] = []
 
-  // Fetch in small batches of 10 locations each (comma-separated lat/lon)
-  const batchSize = 10
+  for (let j = 0; j < entries.length; j++) {
+    const entry = entries[j]
+    const c = entry?.current
+    if (!c) continue
+
+    const lat = entry.latitude ?? batch[j]?.lat
+    const lon = entry.longitude ?? batch[j]?.lon
+    if (lat == null || lon == null) continue
+
+    results.push({
+      id: `wx-${lat}-${lon}`,
+      latitude: lat,
+      longitude: lon,
+      temperature: c.temperature_2m ?? 0,
+      windSpeed: c.wind_speed_10m ?? 0,
+      windDirection: c.wind_direction_10m ?? 0,
+      weatherCode: c.weather_code ?? 0,
+      isDay: c.is_day === 1,
+      precipitation: c.precipitation ?? 0,
+      cloudCover: c.cloud_cover ?? 0,
+    })
+  }
+
+  return results
+}
+
+/**
+ * Fetch current weather for a dense global grid (~350 points).
+ * Uses concurrent requests (3 at a time) for speed while being
+ * respectful of Open-Meteo's free tier.
+ * Concurrent calls share one request and results are cached 5 min —
+ * the grid costs ~15 API calls, so StrictMode double-effects would
+ * otherwise trip Open-Meteo's burst limiter.
+ */
+let _wxInFlight: Promise<WeatherPoint[]> | null = null
+let _wxCache: { data: WeatherPoint[]; at: number } | null = null
+
+export async function fetchWeather(): Promise<WeatherPoint[]> {
+  if (_wxCache && Date.now() - _wxCache.at < 5 * 60_000) return _wxCache.data
+  if (_wxInFlight) return _wxInFlight
+  _wxInFlight = fetchWeatherUncached().then(data => {
+    if (data.length) _wxCache = { data, at: Date.now() }
+    return data
+  }).finally(() => { _wxInFlight = null })
+  return _wxInFlight
+}
+
+async function fetchWeatherUncached(): Promise<WeatherPoint[]> {
+  const grid = generateWorldGrid()
+  const results: WeatherPoint[] = []
+  const signal = AbortSignal.timeout(45_000)
+
+  // Split into batches of 25 locations each (URL stays under limits)
+  const batchSize = 25
+  const batches: Array<Array<{ lat: number; lon: number }>> = []
   for (let i = 0; i < grid.length; i += batchSize) {
-    const batch = grid.slice(i, i + batchSize)
-    try {
-      const lats = batch.map(p => p.lat).join(',')
-      const lons = batch.map(p => p.lon).join(',')
-      const url =
-        `https://api.open-meteo.com/v1/forecast` +
-        `?latitude=${lats}&longitude=${lons}` +
-        `&current=temperature_2m,wind_speed_10m,wind_direction_10m,weather_code,is_day,precipitation,cloud_cover` +
-        `&forecast_days=1`
+    batches.push(grid.slice(i, i + batchSize))
+  }
 
-      const res = await fetch(url, { signal: AbortSignal.timeout(15_000) })
-      if (!res.ok) {
-        console.warn(`[Weather] HTTP ${res.status} for batch ${i}`)
-        continue
-      }
+  // Fetch with concurrency limit of 3
+  const concurrency = 3
+  for (let i = 0; i < batches.length; i += concurrency) {
+    const chunk = batches.slice(i, i + concurrency)
+    const promises = chunk.map(batch => fetchBatch(batch, signal).catch(() => [] as WeatherPoint[]))
+    const chunkResults = await Promise.all(promises)
+    for (const r of chunkResults) results.push(...r)
 
-      const data = await res.json()
-
-      // Open-Meteo returns an array for multi-location, object for single
-      const entries = Array.isArray(data) ? data : [data]
-
-      for (let j = 0; j < entries.length; j++) {
-        const entry = entries[j]
-        const c = entry?.current
-        if (!c) continue
-
-        const lat = entry.latitude ?? batch[j]?.lat
-        const lon = entry.longitude ?? batch[j]?.lon
-        if (lat == null || lon == null) continue
-
-        results.push({
-          id: `wx-${lat}-${lon}`,
-          latitude: lat,
-          longitude: lon,
-          temperature: c.temperature_2m ?? 0,
-          windSpeed: c.wind_speed_10m ?? 0,
-          windDirection: c.wind_direction_10m ?? 0,
-          weatherCode: c.weather_code ?? 0,
-          isDay: c.is_day === 1,
-          precipitation: c.precipitation ?? 0,
-          cloudCover: c.cloud_cover ?? 0,
-        })
-      }
-    } catch (err) {
-      console.warn(`[Weather] Batch ${i} fetch failed:`, err)
-    }
-
-    // Small delay between batches to avoid rate limiting
-    if (i + batchSize < grid.length) {
-      await new Promise(r => setTimeout(r, 200))
+    // Small delay between concurrent groups
+    if (i + concurrency < batches.length) {
+      await new Promise(r => setTimeout(r, 150))
     }
   }
 

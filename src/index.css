@@ -5,14 +5,14 @@
   --color-worldview-nvg: #fcd34d;
   --color-worldview-radar: #3b82f6;
   --color-worldview-bg: #02040a;
-  --color-worldview-panel: rgba(10, 20, 48, 0.92);
-  --color-worldview-border: rgba(60, 100, 180, 0.70);
+  --color-worldview-panel: rgba(10, 10, 10, 0.85);
+  --color-worldview-border: #2A2A2A;
   --color-worldview-cyan: #00f0ff;
   --color-worldview-orange: #d97736;
   --color-worldview-red: #dd4444;
   --color-worldview-green: #36d977;
-  --color-worldview-text-main: #607b9e;
-  --color-worldview-text-bright: #a1bde0;
+  --color-worldview-text-main: #666666;
+  --color-worldview-text-bright: #CCCCCC;
 }
 
 @layer base {
@@ -24,12 +24,10 @@
 }
 
 .glass-panel {
-  background: linear-gradient(160deg, rgba(16, 32, 68, 0.94) 0%, rgba(8, 16, 40, 0.94) 100%);
-  border: 1px solid rgba(60, 100, 180, 0.65);
-  border-top: 1px solid rgba(100, 160, 255, 0.30);
-  border-radius: 12px;
-  backdrop-filter: blur(16px);
-  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(60, 100, 200, 0.08), inset 0 1px 0 rgba(140, 200, 255, 0.08);
+  background: rgba(10, 10, 10, 0.85);
+  border: 1px solid rgba(42, 42, 42, 0.6);
+  border-radius: 8px;
+  backdrop-filter: blur(12px);
 }
 
 /* Post-processing effects (scanlines, vignette) are now handled by GPU shaders
@@ -47,7 +45,7 @@
 
 .custom-scrollbar::-webkit-scrollbar { width: 4px; }
 .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-.custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(30, 48, 80, 0.6); border-radius: 2px; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(42, 42, 42, 0.8); border-radius: 2px; }
 
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 .no-scrollbar::-webkit-scrollbar { display: none; }
@@ -81,4 +79,3 @@ html, body, #root {
   color: white;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
-

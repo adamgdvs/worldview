@@ -1,5 +1,5 @@
-import { useRef, useCallback } from 'react'
-import { Play, Pause } from 'lucide-react'
+import { useRef, useCallback, useState } from 'react'
+import { Play, Pause, Eye, EyeOff } from 'lucide-react'
 import { useStore, type CameraPreset } from '../store'
 
 const SPEED_OPTIONS: { label: string; value: number }[] = [
@@ -39,6 +39,7 @@ export function PlaybackBar() {
   const cameraFov = useStore((s) => s.cameraFov)
   const selectedCity = useStore((s) => s.selectedCity)
   const activeLayers = useStore((s) => s.activeLayers)
+  const showPlaybackTrails = useStore((s) => s.showPlaybackTrails)
 
   const togglePlayback = useStore((s) => s.togglePlayback)
   const seekPlayback = useStore((s) => s.seekPlayback)
@@ -50,18 +51,35 @@ export function PlaybackBar() {
   const setCameraFov = useStore((s) => s.setCameraFov)
   const setCity = useStore((s) => s.setCity)
   const toggleLayer = useStore((s) => s.toggleLayer)
+  const togglePlaybackTrails = useStore((s) => s.togglePlaybackTrails)
 
   const trackRef = useRef<HTMLDivElement>(null)
+  const [dragging, setDragging] = useState(false)
 
   const [start, end] = playbackRange
   const progress = end > start ? (playbackTime - start) / (end - start) : 0
 
-  const handleTrackClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+  const seekFromX = useCallback((clientX: number) => {
     const rect = trackRef.current?.getBoundingClientRect()
     if (!rect) return
-    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
     seekPlayback(start + pct * (end - start))
   }, [start, end, seekPlayback])
+
+  const handleTrackDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    setDragging(true)
+    seekFromX(e.clientX)
+
+    const onMove = (ev: MouseEvent) => seekFromX(ev.clientX)
+    const onUp = () => {
+      setDragging(false)
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [seekFromX])
 
   const formatTime = (ms: number) => {
     const d = new Date(ms)
@@ -86,6 +104,19 @@ export function PlaybackBar() {
             {playbackPlaying ? <Pause size={14} /> : <Play size={14} />}
           </button>
 
+          {/* Trail visibility toggle */}
+          <button
+            onClick={togglePlaybackTrails}
+            className={`w-8 h-8 flex items-center justify-center rounded border transition-colors flex-shrink-0 ${
+              showPlaybackTrails
+                ? 'border-[#D97736]/40 bg-[#D97736]/10 text-[#D97736] hover:bg-[#D97736]/20'
+                : 'border-worldview-border/20 text-[#555555] hover:text-[#666666]'
+            }`}
+            title={showPlaybackTrails ? 'Hide trails' : 'Show trails'}
+          >
+            {showPlaybackTrails ? <Eye size={14} /> : <EyeOff size={14} />}
+          </button>
+
           {/* Time display */}
           <div className="flex-shrink-0 text-[9px] font-mono text-[#D97736] w-[80px]">
             <div>{formatDate(playbackTime)}</div>
@@ -95,8 +126,8 @@ export function PlaybackBar() {
           {/* Timeline track */}
           <div
             ref={trackRef}
-            onClick={handleTrackClick}
-            className="flex-1 h-6 relative cursor-pointer group"
+            onMouseDown={handleTrackDown}
+            className={`flex-1 h-6 relative cursor-pointer group ${dragging ? 'select-none' : ''}`}
           >
             {/* Track background */}
             <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-1 bg-[#1a2a40] rounded-full" />
@@ -113,7 +144,7 @@ export function PlaybackBar() {
           </div>
 
           {/* Range labels */}
-          <div className="flex-shrink-0 text-[8px] font-mono text-[#4a6385] w-[80px] text-right">
+          <div className="flex-shrink-0 text-[8px] font-mono text-[#555555] w-[80px] text-right">
             <div>{formatTime(start)}</div>
             <div>{formatTime(end)}</div>
           </div>
@@ -127,7 +158,7 @@ export function PlaybackBar() {
                 className={`px-2 py-1 text-[8px] font-mono font-bold tracking-wider border rounded transition-colors ${
                   playbackSpeed === opt.value
                     ? 'border-[#D97736]/60 bg-[#D97736]/15 text-[#D97736]'
-                    : 'border-worldview-border/20 text-[#4a6385] hover:text-[#5a7a9a]'
+                    : 'border-worldview-border/20 text-[#555555] hover:text-[#666666]'
                 }`}
               >
                 {opt.label}
@@ -144,7 +175,7 @@ export function PlaybackBar() {
             className={`px-2 py-1 text-[8px] font-mono font-bold tracking-wider border rounded transition-colors ${
               playbackOrbit
                 ? 'border-[#D97736]/60 bg-[#D97736]/15 text-[#D97736]'
-                : 'border-worldview-border/20 text-[#4a6385]'
+                : 'border-worldview-border/20 text-[#555555]'
             }`}
           >
             ORBIT: {playbackOrbit ? 'ON' : 'OFF'}
@@ -154,7 +185,7 @@ export function PlaybackBar() {
           <select
             value={selectedCity}
             onChange={(e) => setCity(e.target.value)}
-            className="bg-[#0a1628] border border-worldview-border/30 text-[9px] text-worldview-text-bright px-2 py-1 font-mono rounded"
+            className="bg-[#111111] border border-worldview-border/30 text-[9px] text-worldview-text-bright px-2 py-1 font-mono rounded"
           >
             {LOCATIONS.map((loc) => (
               <option key={loc} value={loc}>{loc}</option>
@@ -169,7 +200,7 @@ export function PlaybackBar() {
               className={`px-2 py-1 text-[8px] font-mono font-bold tracking-wider border rounded transition-colors ${
                 cameraPreset === preset
                   ? 'border-[#D97736]/60 bg-[#D97736]/15 text-[#D97736]'
-                  : 'border-worldview-border/20 text-[#4a6385] hover:text-[#5a7a9a]'
+                  : 'border-worldview-border/20 text-[#555555] hover:text-[#666666]'
               }`}
             >
               {preset.replace('_', ' ')}
@@ -178,7 +209,7 @@ export function PlaybackBar() {
 
           {/* Distance slider */}
           <div className="flex items-center gap-1">
-            <span className="text-[7px] text-[#4a6385] font-mono">DIST</span>
+            <span className="text-[7px] text-[#555555] font-mono">DIST</span>
             <input
               type="range"
               min={50}
@@ -187,12 +218,12 @@ export function PlaybackBar() {
               onChange={(e) => setCameraDistance(Number(e.target.value))}
               className="w-16 h-1 accent-[#D97736]"
             />
-            <span className="text-[8px] text-[#5a7a9a] font-mono w-[32px]">{cameraDistance}km</span>
+            <span className="text-[8px] text-[#666666] font-mono w-[32px]">{cameraDistance}km</span>
           </div>
 
           {/* Pitch slider */}
           <div className="flex items-center gap-1">
-            <span className="text-[7px] text-[#4a6385] font-mono">PITCH</span>
+            <span className="text-[7px] text-[#555555] font-mono">PITCH</span>
             <input
               type="range"
               min={-90}
@@ -201,12 +232,12 @@ export function PlaybackBar() {
               onChange={(e) => setCameraPitchAngle(Number(e.target.value))}
               className="w-16 h-1 accent-[#D97736]"
             />
-            <span className="text-[8px] text-[#5a7a9a] font-mono w-[24px]">{cameraPitch}°</span>
+            <span className="text-[8px] text-[#666666] font-mono w-[24px]">{cameraPitch}°</span>
           </div>
 
           {/* FOV slider */}
           <div className="flex items-center gap-1">
-            <span className="text-[7px] text-[#4a6385] font-mono">FOV</span>
+            <span className="text-[7px] text-[#555555] font-mono">FOV</span>
             <input
               type="range"
               min={30}
@@ -215,7 +246,7 @@ export function PlaybackBar() {
               onChange={(e) => setCameraFov(Number(e.target.value))}
               className="w-16 h-1 accent-[#D97736]"
             />
-            <span className="text-[8px] text-[#5a7a9a] font-mono w-[24px]">{cameraFov}°</span>
+            <span className="text-[8px] text-[#666666] font-mono w-[24px]">{cameraFov}°</span>
           </div>
         </div>
 
@@ -228,7 +259,7 @@ export function PlaybackBar() {
               className={`px-2 py-0.5 text-[8px] font-mono font-bold tracking-wider border rounded-full whitespace-nowrap transition-colors ${
                 activeLayers.includes(chip.id)
                   ? 'border-[#00f0ff]/40 bg-[#00f0ff]/10 text-[#00f0ff]'
-                  : 'border-worldview-border/20 text-[#4a6385] hover:text-[#5a7a9a]'
+                  : 'border-worldview-border/20 text-[#555555] hover:text-[#666666]'
               }`}
             >
               {chip.label}
@@ -241,7 +272,7 @@ export function PlaybackBar() {
             <button
               key={chip}
               disabled
-              className="px-2 py-0.5 text-[8px] font-mono tracking-wider border border-worldview-border/10 text-[#304c78] rounded-full whitespace-nowrap cursor-not-allowed"
+              className="px-2 py-0.5 text-[8px] font-mono tracking-wider border border-worldview-border/10 text-[#333333] rounded-full whitespace-nowrap cursor-not-allowed"
             >
               {chip}
             </button>

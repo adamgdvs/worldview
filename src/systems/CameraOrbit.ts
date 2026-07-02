@@ -15,7 +15,7 @@ export class CameraOrbitSystem {
   private heading = 0  // radians, accumulates
   private elapsed = 0
 
-  reset(_distanceKm?: number) {
+  reset() {
     this.heading = 0
     this.elapsed = 0
   }

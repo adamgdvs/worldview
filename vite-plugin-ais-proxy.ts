@@ -50,19 +50,25 @@ export default function aisWebSocketProxy(): Plugin {
 
             upstream.on('close', (code, reason) => {
               console.log(`[AIS proxy] Upstream closed (code: ${code}, reason: ${reason?.toString() || 'none'})`)
+              // Close browser socket with 1001 (Going Away) so the client adapter
+              // treats it as an unexpected disconnect and triggers its reconnect logic
               if (browserWs.readyState === WsWebSocket.OPEN) {
-                browserWs.close()
+                browserWs.close(1001, 'Upstream disconnected')
               }
             })
 
             upstream.on('error', (err) => {
               console.error('[AIS proxy] Upstream error:', err.message)
-              browserWs.close()
+              if (browserWs.readyState === WsWebSocket.OPEN) {
+                browserWs.close(1011, 'Upstream error')
+              }
             })
 
             browserWs.on('error', (err) => {
               console.error('[AIS proxy] Browser WS error:', err.message)
-              upstream.close()
+              if (upstream.readyState === WsWebSocket.OPEN) {
+                upstream.close()
+              }
             })
           })
         })

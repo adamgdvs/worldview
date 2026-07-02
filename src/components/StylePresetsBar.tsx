@@ -5,10 +5,10 @@ const modes = [
   { id: 'CRT',    icon: '▦',  label: 'CRT'    },
   { id: 'NVG',    icon: '☽',  label: 'NVG'    },
   { id: 'FLIR',   icon: '♨',  label: 'FLIR'   },
-  { id: 'Anime',  icon: '✦',  label: 'Anime'  },
-  { id: 'Noir',   icon: '◑',  label: 'Noir'   },
-  { id: 'Snow',   icon: '❄',  label: 'Snow'   },
-  { id: 'AI',     icon: '⊛',  label: 'AI'     },
+  { id: 'SIGINT', icon: '⌁',  label: 'SIGINT' },
+  { id: 'RECON',  icon: '◎',  label: 'RECON'  },
+  { id: 'SAR',    icon: '▩',  label: 'SAR'    },
+  { id: 'MSI',    icon: '≣',  label: 'MSI'    },
 ]
 
 export function StylePresetsBar() {
@@ -34,14 +34,14 @@ export function StylePresetsBar() {
                 className={`w-10 h-10 rounded-full flex items-center justify-center text-base transition-all ${
                   isActive
                     ? 'border-2 border-worldview-cyan bg-worldview-cyan/10 shadow-[0_0_12px_rgba(0,240,255,0.25)] text-worldview-cyan'
-                    : 'border border-worldview-border/40 text-[#4a6385] hover:border-[#5a7a9a] hover:text-[#6A8BAF] hover:bg-white/5'
+                    : 'border border-worldview-border/40 text-[#555555] hover:border-[#666666] hover:text-[#999999] hover:bg-white/5'
                 }`}
               >
                 {mode.icon}
               </div>
               <span
                 className={`text-[7px] font-bold tracking-wider transition-colors ${
-                  isActive ? 'text-worldview-cyan' : 'text-[#4a6385] group-hover:text-[#6A8BAF]'
+                  isActive ? 'text-worldview-cyan' : 'text-[#555555] group-hover:text-[#999999]'
                 }`}
               >
                 {mode.label}

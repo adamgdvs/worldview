@@ -102,7 +102,7 @@ export function ScenesPanel({ viewerRef }: ScenesPanelProps) {
             const val = e.target.value
             if (val !== '') handleLoad(Number(val))
           }}
-          className="flex-1 bg-[#0a1628] border border-worldview-border/30 text-[8px] text-worldview-text-bright px-2 py-1 font-mono"
+          className="flex-1 bg-[#111111] border border-worldview-border/30 text-[8px] text-worldview-text-bright px-2 py-1 font-mono"
         >
           <option value="">Select scene...</option>
           {scenes.map((s, i) => (
@@ -139,7 +139,7 @@ export function ScenesPanel({ viewerRef }: ScenesPanelProps) {
             >
               <div className="flex-1 min-w-0">
                 <div className="text-worldview-text-bright truncate">{s.name}</div>
-                <div className="text-[7px] text-[#4a6385]">
+                <div className="text-[7px] text-[#555555]">
                   {s.mode} · {s.layers.length} layers
                 </div>
               </div>
@@ -167,11 +167,11 @@ export function ScenesPanel({ viewerRef }: ScenesPanelProps) {
         <div className="flex gap-2">
           <button
             onClick={handleExport}
-            className="flex-1 px-2 py-1 border border-worldview-border/30 text-[8px] text-[#5a7a9a] font-bold tracking-wider hover:text-worldview-text-bright transition-colors"
+            className="flex-1 px-2 py-1 border border-worldview-border/30 text-[8px] text-[#666666] font-bold tracking-wider hover:text-worldview-text-bright transition-colors"
           >
             EXPORT
           </button>
-          <label className="flex-1 px-2 py-1 border border-worldview-border/30 text-[8px] text-[#5a7a9a] font-bold tracking-wider hover:text-worldview-text-bright transition-colors text-center cursor-pointer">
+          <label className="flex-1 px-2 py-1 border border-worldview-border/30 text-[8px] text-[#666666] font-bold tracking-wider hover:text-worldview-text-bright transition-colors text-center cursor-pointer">
             IMPORT
             <input
               ref={fileInputRef}
@@ -186,7 +186,7 @@ export function ScenesPanel({ viewerRef }: ScenesPanelProps) {
 
       {scenes.length === 0 && (
         <div className="text-center">
-          <span className="text-[8px] text-[#304c78] tracking-widest">NO SCENES CAPTURED</span>
+          <span className="text-[8px] text-[#333333] tracking-widest">NO SCENES CAPTURED</span>
         </div>
       )}
     </div>

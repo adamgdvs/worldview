@@ -4,6 +4,6 @@ export const config = { runtime: 'edge' }
 
 export default (req: Request) =>
   proxyRequest(req, {
-    upstream: 'https://api.adsb.fi',
+    upstream: 'https://opendata.adsb.fi',
     prefix: '/adsbfi',
   })

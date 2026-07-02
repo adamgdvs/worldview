@@ -10,18 +10,43 @@ export interface ProxyConfig {
   fixedPath?: string
   /** Extra headers to inject into the upstream request */
   extraHeaders?: Record<string, string>
+  /** If true, strip Authorization header from the forwarded request (use when credentials are injected server-side) */
+  stripAuth?: boolean
 }
 
-const CORS_HEADERS: Record<string, string> = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+// Allowed origins — restrict to our own domains
+const ALLOWED_ORIGINS = new Set([
+  'https://worldview.app',
+  'https://www.worldview.app',
+  'http://localhost:5173',
+  'http://localhost:4173',
+])
+
+function getCorsOrigin(req: Request): string {
+  const origin = req.headers.get('origin') ?? ''
+  // Allow configured origins and any Vercel preview deploys
+  if (ALLOWED_ORIGINS.has(origin) || origin.endsWith('.vercel.app')) {
+    return origin
+  }
+  // Default to production domain (blocks cross-origin reads for unrecognized origins)
+  return 'https://worldview.app'
+}
+
+function corsHeaders(req: Request): Record<string, string> {
+  return {
+    'Access-Control-Allow-Origin': getCorsOrigin(req),
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Vary': 'Origin',
+  }
 }
 
 export async function proxyRequest(req: Request, config: ProxyConfig): Promise<Response> {
+  const cors = corsHeaders(req)
+
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers: CORS_HEADERS })
+    return new Response(null, { status: 204, headers: cors })
   }
 
   const url = new URL(req.url)
@@ -29,11 +54,14 @@ export async function proxyRequest(req: Request, config: ProxyConfig): Promise<R
     ?? url.pathname.replace(new RegExp(`^${config.prefix}`), '')
   const upstreamUrl = `${config.upstream}${upstreamPath}${url.search}`
 
-  // Forward the request
+  // Forward the request — strip sensitive headers
   const headers = new Headers(req.headers)
   headers.delete('host')
   headers.delete('origin')
   headers.delete('referer')
+  if (config.stripAuth) {
+    headers.delete('authorization')
+  }
   if (config.extraHeaders) {
     for (const [k, v] of Object.entries(config.extraHeaders)) {
       headers.set(k, v)
@@ -50,7 +78,7 @@ export async function proxyRequest(req: Request, config: ProxyConfig): Promise<R
 
   // Build response with CORS headers
   const responseHeaders = new Headers(res.headers)
-  for (const [k, v] of Object.entries(CORS_HEADERS)) {
+  for (const [k, v] of Object.entries(cors)) {
     responseHeaders.set(k, v)
   }
   // Remove headers that break edge streaming
